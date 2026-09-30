@@ -1,0 +1,21 @@
+{
+  "dataset": "quora",
+  "encoder": "bert",
+  "ranker": "chamfer",
+  "symmetric": true,
+  "queries": "bert-base-uncased_d768_nv32",
+  "corpus": "bert-base-uncased_d768_nv180",
+  "k": 100,
+  "ignore_identical_ids": false,
+  "num_queries": 15000,
+  "num_docs": 522931,
+  "device": "cuda",
+  "dtype": "float16",
+  "seconds": 131.6,
+  "metrics": {
+    "ndcg@10": 0.6593,
+    "recall@100": 0.9039,
+    "mrr@10": 0.656
+  },
+  "qrels_split": "test"
+}

@@ -11,5 +11,11 @@
   "num_docs": 8674,
   "device": "cuda",
   "dtype": "float16",
-  "seconds": 24.7
+  "seconds": 1.7,
+  "metrics": {
+    "ndcg@10": 0.3414,
+    "recall@100": 0.8208,
+    "mrr@10": 0.2791
+  },
+  "qrels_split": "test"
 }
