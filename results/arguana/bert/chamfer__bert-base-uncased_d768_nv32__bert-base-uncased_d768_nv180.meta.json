@@ -1,0 +1,15 @@
+{
+  "dataset": "arguana",
+  "encoder": "bert",
+  "ranker": "chamfer",
+  "symmetric": false,
+  "queries": "bert-base-uncased_d768_nv32",
+  "corpus": "bert-base-uncased_d768_nv180",
+  "k": 100,
+  "ignore_identical_ids": true,
+  "num_queries": 1406,
+  "num_docs": 8674,
+  "device": "cuda",
+  "dtype": "float16",
+  "seconds": 24.7
+}
