@@ -9,8 +9,13 @@ Writes  results/<name>/<encoder>/<ranker>__<query tag>__<corpus tag>.trec
 The .trec file is a standard TREC run (`qid Q0 docid rank score run`), readable by
 trec_eval / pytrec_eval / ir_measures.
 
-The corpus is streamed once in length-sorted chunks (bounded padding and memory);
-every chunk is scored against all queries and merged into a running top-k.
+Vectors are preloaded into RAM before timing starts (one sequential read), so `seconds` in
+the .meta.json measures search only and `load_seconds` the read. Loaded vectors are cached
+for the most recent dataset/tags, so several runs in one process (e.g. search.ipynb) read the
+files once. Pass --no-preload / preload=False to memory-map instead (corpora larger than RAM).
+
+The corpus is scored in length-sorted chunks (bounded padding and GPU memory); every chunk
+is scored against all queries and merged into a running top-k.
 
 Usage:
   python src/search.py --ranker chamfer --encoder colbert --datasets arguana
@@ -32,11 +37,10 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from encode import DATASETS_DIR, ROOT, load_vectors, pick_device
+from encode import load_vectors, pick_device
 from evaluate import DEFAULT_METRICS, evaluate, load_qrels
 from methods import ChamferRanker, SlicedWassersteinRanker
-
-RESULTS_DIR = ROOT / "results"
+from paths import DATASETS_DIR, RESULTS_DIR, ROOT
 
 
 def find_prefix(folder, tag):
@@ -111,13 +115,28 @@ def make_ranker(name, dim, device, symmetric=False, slices=64, quantiles=32, p=2
     raise ValueError(f"unknown ranker {name!r}")
 
 
+_cache = {"key": None, "data": None}
+
+
+def load_pair(qprefix, dprefix, preload):
+    """Load query and corpus vectors, reusing the last pair if nothing changed on disk."""
+    files = [Path(f"{p}.vectors.npy") for p in (qprefix, dprefix)]
+    key = (str(qprefix), str(dprefix), preload, tuple(f.stat().st_mtime_ns for f in files))
+    if _cache["key"] != key:
+        _cache["key"] = _cache["data"] = None  # release the previous dataset first
+        _cache["data"] = (load_vectors(qprefix, mmap=not preload), load_vectors(dprefix, mmap=not preload))
+        _cache["key"] = key
+    return _cache["data"]
+
+
 def run_search(dataset, ranker="chamfer", encoder="colbert", query_tag=None, corpus_tag=None,
                k=100, ignore_identical_ids=False, device="auto", dtype="auto",
                query_block=32, chunk_vectors=131072, write=True, qrels_split="test",
-               metrics=DEFAULT_METRICS, **ranker_opts):
+               metrics=DEFAULT_METRICS, preload=True, **ranker_opts):
     """Search one dataset. `ranker` is "chamfer", "sw", or a ranker instance; extra keyword
     arguments go to make_ranker (symmetric, slices, quantiles, p, seed).
 
+    With `preload`, vectors are read into RAM (and cached across calls) before timing starts.
     If qrels for `qrels_split` exist, the run is evaluated and meta["metrics"] is filled.
     Returns a dict with `results` ({qid: [(docid, score), ...]}), `meta`, and `path` (or None).
     """
@@ -127,14 +146,16 @@ def run_search(dataset, ranker="chamfer", encoder="colbert", query_tag=None, cor
 
     qprefix = find_prefix(DATASETS_DIR / dataset / "vec_queries" / encoder, query_tag)
     dprefix = find_prefix(DATASETS_DIR / dataset / "vec_corpus" / encoder, corpus_tag)
-    QV, qoff, qids, qmeta = load_vectors(qprefix)
-    DV, doff, dids, dmeta = load_vectors(dprefix)
+    t_load = time.time()
+    (QV, qoff, qids, qmeta), (DV, doff, dids, dmeta) = load_pair(qprefix, dprefix, preload)
+    load_seconds = time.time() - t_load
     if qmeta["dim"] != dmeta["dim"]:
         raise SystemExit(f"dimension mismatch: {qprefix.name} vs {dprefix.name}")
     if isinstance(ranker, str):
         ranker = make_ranker(ranker, dmeta["dim"], device, **ranker_opts)
 
-    print(f"[{dataset}] {ranker.tag}: {len(qids)} queries x {len(dids)} docs  device={device} dtype={dtype}")
+    print(f"[{dataset}] {ranker.tag}: {len(qids)} queries x {len(dids)} docs  device={device} dtype={dtype}"
+          + (f"  (loaded in {load_seconds:.1f}s)" if preload else ""))
     extra = 1 if ignore_identical_ids else 0
     t0 = time.time()
     scores, idx = search(ranker, (QV, qoff), (DV, doff), k + extra, device, dtype, query_block, chunk_vectors)
@@ -152,6 +173,7 @@ def run_search(dataset, ranker="chamfer", encoder="colbert", query_tag=None, cor
         "num_queries": len(qids), "num_docs": len(dids),
         "device": device, "dtype": str(dtype).removeprefix("torch."),
         "seconds": round(elapsed, 1),
+        "preload": preload, "load_seconds": round(load_seconds, 1),
     }
     try:
         meta["metrics"] = evaluate(results, load_qrels(dataset, qrels_split), metrics)
@@ -197,6 +219,8 @@ def main():
                    help="compute dtype for vectors (auto: float16 on GPU, float32 on CPU)")
     p.add_argument("--query-block", type=int, default=32)
     p.add_argument("--chunk-vectors", type=int, default=131072, help="padded doc vectors per chunk")
+    p.add_argument("--no-preload", dest="preload", action="store_false",
+                   help="memory-map vectors instead of reading them into RAM first")
     args = p.parse_args()
 
     names = args.datasets or sorted(
@@ -210,7 +234,7 @@ def main():
         for opts in configs:
             run_search(name, args.ranker, args.encoder, args.query_tag, args.corpus_tag, args.k,
                        args.ignore_identical_ids, args.device, args.dtype, args.query_block,
-                       args.chunk_vectors, **opts)
+                       args.chunk_vectors, preload=args.preload, **opts)
 
 
 if __name__ == "__main__":

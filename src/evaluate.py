@@ -19,9 +19,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from encode import DATASETS_DIR, ROOT
-
-RESULTS_DIR = ROOT / "results"
+from paths import DATASETS_DIR, RESULTS_DIR
 DEFAULT_METRICS = ("ndcg@10", "recall@100", "mrr@10")
 
 

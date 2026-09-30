@@ -40,8 +40,7 @@ import torch
 from torch import nn
 from transformers import AutoTokenizer, BertModel, BertPreTrainedModel
 
-ROOT = Path(__file__).resolve().parent.parent
-DATASETS_DIR = ROOT / "datasets"
+from paths import DATASETS_DIR, ROOT
 
 MODELS = {
     "colbert": "colbert-ir/colbertv2.0",
