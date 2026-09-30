@@ -1,0 +1,21 @@
+{
+  "dataset": "arguana",
+  "encoder": "colbert",
+  "ranker": "chamfer",
+  "symmetric": false,
+  "queries": "colbertv2.0_d128_nv32",
+  "corpus": "colbertv2.0_d128_nv180",
+  "k": 100,
+  "ignore_identical_ids": true,
+  "num_queries": 1406,
+  "num_docs": 8674,
+  "device": "mps",
+  "dtype": "float16",
+  "seconds": 6.5,
+  "metrics": {
+    "ndcg@10": 0.454,
+    "recall@100": 0.9075,
+    "mrr@10": 0.3786
+  },
+  "qrels_split": "test"
+}

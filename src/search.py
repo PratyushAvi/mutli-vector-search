@@ -14,7 +14,10 @@ every chunk is scored against all queries and merged into a running top-k.
 
 Usage:
   python src/search.py --ranker chamfer --encoder colbert --datasets arguana
-  python src/search.py --ranker sw --encoder bert --datasets scidocs --k 100 --projections 128
+  python src/search.py --ranker sw --encoder bert --datasets scidocs --k 100 --slices 16 64 256
+
+If datasets/<name>/qrels/ exists, each run is also evaluated (see evaluate.py) and the
+metrics are printed and stored in the run's .meta.json.
 
 From Python / a notebook:
   from search import run_search
@@ -30,6 +33,7 @@ import numpy as np
 import torch
 
 from encode import DATASETS_DIR, ROOT, load_vectors, pick_device
+from evaluate import DEFAULT_METRICS, evaluate, load_qrels
 from methods import ChamferRanker, SlicedWassersteinRanker
 
 RESULTS_DIR = ROOT / "results"
@@ -99,20 +103,22 @@ def search(ranker, queries, corpus, k, device, dtype, query_block, chunk_vectors
     return top_s.cpu().numpy(), top_i.cpu().numpy()
 
 
-def make_ranker(name, dim, device, symmetric=False, projections=64, quantiles=32, p=2, seed=0):
+def make_ranker(name, dim, device, symmetric=False, slices=64, quantiles=32, p=2, seed=0):
     if name == "chamfer":
         return ChamferRanker(symmetric=symmetric)
     if name == "sw":
-        return SlicedWassersteinRanker(dim, projections, quantiles, p, seed, device)
+        return SlicedWassersteinRanker(dim, slices, quantiles, p, seed, device)
     raise ValueError(f"unknown ranker {name!r}")
 
 
 def run_search(dataset, ranker="chamfer", encoder="colbert", query_tag=None, corpus_tag=None,
                k=100, ignore_identical_ids=False, device="auto", dtype="auto",
-               query_block=32, chunk_vectors=131072, write=True, **ranker_opts):
+               query_block=32, chunk_vectors=131072, write=True, qrels_split="test",
+               metrics=DEFAULT_METRICS, **ranker_opts):
     """Search one dataset. `ranker` is "chamfer", "sw", or a ranker instance; extra keyword
-    arguments go to make_ranker (symmetric, projections, quantiles, p, seed).
+    arguments go to make_ranker (symmetric, slices, quantiles, p, seed).
 
+    If qrels for `qrels_split` exist, the run is evaluated and meta["metrics"] is filled.
     Returns a dict with `results` ({qid: [(docid, score), ...]}), `meta`, and `path` (or None).
     """
     device = pick_device(device)
@@ -147,6 +153,12 @@ def run_search(dataset, ranker="chamfer", encoder="colbert", query_tag=None, cor
         "device": device, "dtype": str(dtype).removeprefix("torch."),
         "seconds": round(elapsed, 1),
     }
+    try:
+        meta["metrics"] = evaluate(results, load_qrels(dataset, qrels_split), metrics)
+        meta["qrels_split"] = qrels_split
+        print("  " + "  ".join(f"{m}={v:.4f}" for m, v in meta["metrics"].items()))
+    except FileNotFoundError:
+        pass
 
     path = None
     if write:
@@ -175,7 +187,8 @@ def main():
     p.add_argument("--ignore-identical-ids", action="store_true",
                    help="drop results whose doc id equals the query id (BEIR convention for ArguAna)")
     p.add_argument("--symmetric", action="store_true", help="chamfer: symmetric instead of query->doc")
-    p.add_argument("--projections", type=int, default=64, help="sw: number of random directions L")
+    p.add_argument("--slices", "--projections", type=int, nargs="+", default=[64],
+                   help="sw: number of random slices L; several values run one search each")
     p.add_argument("--quantiles", type=int, default=32, help="sw: quantile grid size K")
     p.add_argument("--p", type=int, choices=[1, 2], default=2, help="sw: Wasserstein order")
     p.add_argument("--seed", type=int, default=0, help="sw: projection seed")
@@ -188,13 +201,16 @@ def main():
 
     names = args.datasets or sorted(
         d.name for d in DATASETS_DIR.iterdir() if (d / "vec_corpus" / args.encoder).is_dir())
-    ranker_opts = {"chamfer": {"symmetric": args.symmetric},
-                   "sw": {"projections": args.projections, "quantiles": args.quantiles,
-                          "p": args.p, "seed": args.seed}}[args.ranker]
+    if args.ranker == "chamfer":
+        configs = [{"symmetric": args.symmetric}]
+    else:
+        configs = [{"slices": L, "quantiles": args.quantiles, "p": args.p, "seed": args.seed}
+                   for L in args.slices]
     for name in names:
-        run_search(name, args.ranker, args.encoder, args.query_tag, args.corpus_tag, args.k,
-                   args.ignore_identical_ids, args.device, args.dtype, args.query_block,
-                   args.chunk_vectors, **ranker_opts)
+        for opts in configs:
+            run_search(name, args.ranker, args.encoder, args.query_tag, args.corpus_tag, args.k,
+                       args.ignore_identical_ids, args.device, args.dtype, args.query_block,
+                       args.chunk_vectors, **opts)
 
 
 if __name__ == "__main__":
