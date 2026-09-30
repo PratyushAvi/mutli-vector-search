@@ -10,14 +10,14 @@
   "excluded_ids": true,
   "num_queries": 151,
   "num_docs": 3508,
-  "device": "mps",
+  "device": "cuda",
   "dtype": "float16",
-  "seconds": 0.7,
+  "seconds": 0.8,
   "preload": true,
-  "load_seconds": 0.0,
+  "load_seconds": 0.2,
   "metrics": {
     "ndcg@10": 0.0526,
-    "recall@100": 0.1623,
+    "recall@100": 0.1621,
     "mrr@10": 0.1084
   },
   "qrels_split": "test"
