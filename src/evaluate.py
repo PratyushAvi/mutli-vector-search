@@ -40,11 +40,20 @@ def load_qrels(dataset, split="test"):
 
 
 def load_run(path):
-    """Read a TREC run file into {query_id: [(doc_id, score), ...]} in rank order."""
+    """Read a TREC run file into {query_id: [(doc_id, score), ...]} in rank order.
+
+    Lines are tab-separated (search.py); older space-separated runs are also read, taking the
+    fixed fields from both ends so a doc id containing spaces stays intact.
+    """
     run = defaultdict(list)
     with open(path) as f:
         for line in f:
-            qid, _, did, rank, score, _ = line.split()
+            fields = line.rstrip("\n").split("\t")
+            if len(fields) == 6:
+                qid, _, did, rank, score, _ = fields
+            else:
+                qid, _, rest = line.split(maxsplit=2)
+                did, rank, score, _ = rest.rsplit(maxsplit=3)
             run[qid].append((int(rank), did, float(score)))
     return {q: [(d, s) for _, d, s in sorted(hits)] for q, hits in run.items()}
 

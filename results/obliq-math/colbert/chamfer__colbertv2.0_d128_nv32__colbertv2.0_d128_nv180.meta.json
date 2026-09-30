@@ -12,7 +12,7 @@
   "num_docs": 3508,
   "device": "mps",
   "dtype": "float16",
-  "seconds": 0.7,
+  "seconds": 0.3,
   "preload": true,
   "load_seconds": 0.0,
   "metrics": {

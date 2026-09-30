@@ -6,8 +6,8 @@ Reads   datasets/<name>/vec_{queries,corpus}/<encoder>/<tag>.*   (written by enc
 Writes  results/<name>/<encoder>/<ranker>__<query tag>__<corpus tag>.trec
         results/<name>/<encoder>/<ranker>__<query tag>__<corpus tag>.meta.json
 
-The .trec file is a standard TREC run (`qid Q0 docid rank score run`), readable by
-trec_eval / pytrec_eval / ir_measures.
+The .trec file is a standard TREC run (`qid Q0 docid rank score run`), tab-separated so ids
+may contain spaces (OBLIQ math has one); readable by evaluate.py / pytrec_eval / ir_measures.
 
 Vectors are preloaded into RAM before timing starts (one sequential read), so `seconds` in
 the .meta.json measures search only and `load_seconds` the read. Loaded vectors are cached
@@ -205,7 +205,7 @@ def run_search(dataset, ranker="chamfer", encoder="colbert", query_tag=None, cor
         with open(f"{stem}.trec", "w") as f:
             for qid, hits in results.items():
                 for rank, (did, s) in enumerate(hits, 1):
-                    f.write(f"{qid} Q0 {did} {rank} {s:.6f} {ranker.tag}\n")
+                    f.write(f"{qid}\tQ0\t{did}\t{rank}\t{s:.6f}\t{ranker.tag}\n")
         with open(f"{stem}.meta.json", "w") as f:
             json.dump(meta, f, indent=2)
         path = Path(f"{stem}.trec")
