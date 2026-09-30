@@ -1,0 +1,21 @@
+{
+  "dataset": "scidocs",
+  "encoder": "bert",
+  "ranker": "chamfer",
+  "symmetric": true,
+  "queries": "bert-base-uncased_d768_nv32",
+  "corpus": "bert-base-uncased_d768_nv180",
+  "k": 100,
+  "ignore_identical_ids": false,
+  "num_queries": 1000,
+  "num_docs": 25657,
+  "device": "cuda",
+  "dtype": "float16",
+  "seconds": 5.0,
+  "metrics": {
+    "ndcg@10": 0.0596,
+    "recall@100": 0.2319,
+    "mrr@10": 0.1086
+  },
+  "qrels_split": "test"
+}
