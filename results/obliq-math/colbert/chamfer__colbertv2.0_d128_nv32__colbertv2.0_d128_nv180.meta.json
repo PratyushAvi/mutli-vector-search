@@ -1,0 +1,24 @@
+{
+  "dataset": "obliq-math",
+  "encoder": "colbert",
+  "ranker": "chamfer",
+  "symmetric": false,
+  "queries": "colbertv2.0_d128_nv32",
+  "corpus": "colbertv2.0_d128_nv180",
+  "k": 100,
+  "ignore_identical_ids": false,
+  "excluded_ids": true,
+  "num_queries": 151,
+  "num_docs": 3508,
+  "device": "mps",
+  "dtype": "float16",
+  "seconds": 0.7,
+  "preload": true,
+  "load_seconds": 0.0,
+  "metrics": {
+    "ndcg@10": 0.0526,
+    "recall@100": 0.1623,
+    "mrr@10": 0.1084
+  },
+  "qrels_split": "test"
+}

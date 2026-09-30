@@ -14,6 +14,9 @@ the .meta.json measures search only and `load_seconds` the read. Loaded vectors 
 for the most recent dataset/tags, so several runs in one process (e.g. search.ipynb) read the
 files once. Pass --no-preload / preload=False to memory-map instead (corpora larger than RAM).
 
+If datasets/<name>/excluded_ids.json exists ({query_id: [doc_id, ...]}, e.g. OBLIQ-Bench math
+and writing), those documents are removed from each query's results.
+
 The corpus is scored in length-sorted chunks (bounded padding and GPU memory); every chunk
 is scored against all queries and merged into a running top-k.
 
@@ -129,13 +132,22 @@ def load_pair(qprefix, dprefix, preload):
     return _cache["data"]
 
 
+def load_excluded(dataset):
+    """{query_id: set(doc_ids)} to drop from results, or {} if the dataset defines none."""
+    path = DATASETS_DIR / dataset / "excluded_ids.json"
+    if not path.exists():
+        return {}
+    return {q: set(ids) for q, ids in json.loads(path.read_text()).items()}
+
+
 def run_search(dataset, ranker="chamfer", encoder="colbert", query_tag=None, corpus_tag=None,
                k=100, ignore_identical_ids=False, device="auto", dtype="auto",
                query_block=32, chunk_vectors=131072, write=True, qrels_split="test",
-               metrics=DEFAULT_METRICS, preload=True, **ranker_opts):
+               metrics=DEFAULT_METRICS, preload=True, apply_exclusions=True, **ranker_opts):
     """Search one dataset. `ranker` is "chamfer", "sw", or a ranker instance; extra keyword
     arguments go to make_ranker (symmetric, slices, quantiles, p, seed).
 
+    With `apply_exclusions`, documents listed in datasets/<name>/excluded_ids.json are dropped.
     With `preload`, vectors are read into RAM (and cached across calls) before timing starts.
     If qrels for `qrels_split` exist, the run is evaluated and meta["metrics"] is filled.
     Returns a dict with `results` ({qid: [(docid, score), ...]}), `meta`, and `path` (or None).
@@ -156,20 +168,23 @@ def run_search(dataset, ranker="chamfer", encoder="colbert", query_tag=None, cor
 
     print(f"[{dataset}] {ranker.tag}: {len(qids)} queries x {len(dids)} docs  device={device} dtype={dtype}"
           + (f"  (loaded in {load_seconds:.1f}s)" if preload else ""))
-    extra = 1 if ignore_identical_ids else 0
+    exclude = load_excluded(dataset) if apply_exclusions else {}
+    # Fetch enough extra hits that k remain after dropping self-matches / excluded docs.
+    extra = (1 if ignore_identical_ids else 0) + max(map(len, exclude.values()), default=0)
     t0 = time.time()
     scores, idx = search(ranker, (QV, qoff), (DV, doff), k + extra, device, dtype, query_block, chunk_vectors)
     elapsed = time.time() - t0
 
     results = {}
     for qi, qid in enumerate(qids):
+        drop = exclude.get(qid, ())
         hits = [(dids[j], float(s)) for j, s in zip(idx[qi], scores[qi])
-                if j >= 0 and not (ignore_identical_ids and dids[j] == qid)]
+                if j >= 0 and not (ignore_identical_ids and dids[j] == qid) and dids[j] not in drop]
         results[qid] = hits[:k]
     meta = {
         "dataset": dataset, "encoder": encoder, **ranker.config(),
         "queries": qprefix.name, "corpus": dprefix.name, "k": k,
-        "ignore_identical_ids": ignore_identical_ids,
+        "ignore_identical_ids": ignore_identical_ids, "excluded_ids": bool(exclude),
         "num_queries": len(qids), "num_docs": len(dids),
         "device": device, "dtype": str(dtype).removeprefix("torch."),
         "seconds": round(elapsed, 1),
