@@ -1,0 +1,27 @@
+{
+  "dataset": "obliq-writing",
+  "encoder": "bert",
+  "ranker": "sliced_wasserstein",
+  "slices": 64,
+  "quantiles": 32,
+  "p": 2,
+  "seed": 0,
+  "queries": "bert-base-uncased_d768_nv32",
+  "corpus": "bert-base-uncased_d768_nv180",
+  "k": 100,
+  "ignore_identical_ids": false,
+  "excluded_ids": true,
+  "num_queries": 512,
+  "num_docs": 10389,
+  "device": "cuda",
+  "dtype": "float16",
+  "seconds": 0.6,
+  "preload": true,
+  "load_seconds": 0.0,
+  "metrics": {
+    "ndcg@10": 0.0068,
+    "recall@100": 0.0477,
+    "mrr@10": 0.0163
+  },
+  "qrels_split": "test"
+}

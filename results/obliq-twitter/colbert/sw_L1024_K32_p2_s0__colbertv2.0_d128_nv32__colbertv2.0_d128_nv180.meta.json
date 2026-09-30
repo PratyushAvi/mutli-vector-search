@@ -1,0 +1,27 @@
+{
+  "dataset": "obliq-twitter",
+  "encoder": "colbert",
+  "ranker": "sliced_wasserstein",
+  "slices": 1024,
+  "quantiles": 32,
+  "p": 2,
+  "seed": 0,
+  "queries": "colbertv2.0_d128_nv32",
+  "corpus": "colbertv2.0_d128_nv180",
+  "k": 100,
+  "ignore_identical_ids": false,
+  "excluded_ids": false,
+  "num_queries": 281,
+  "num_docs": 72122,
+  "device": "cuda",
+  "dtype": "float16",
+  "seconds": 1.1,
+  "preload": true,
+  "load_seconds": 0.0,
+  "metrics": {
+    "ndcg@10": 0.0006,
+    "recall@100": 0.0075,
+    "mrr@10": 0.0014
+  },
+  "qrels_split": "test"
+}

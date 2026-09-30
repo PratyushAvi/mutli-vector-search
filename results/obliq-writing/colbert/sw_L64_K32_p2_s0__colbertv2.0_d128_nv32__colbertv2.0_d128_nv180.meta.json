@@ -1,0 +1,27 @@
+{
+  "dataset": "obliq-writing",
+  "encoder": "colbert",
+  "ranker": "sliced_wasserstein",
+  "slices": 64,
+  "quantiles": 32,
+  "p": 2,
+  "seed": 0,
+  "queries": "colbertv2.0_d128_nv32",
+  "corpus": "colbertv2.0_d128_nv180",
+  "k": 100,
+  "ignore_identical_ids": false,
+  "excluded_ids": true,
+  "num_queries": 512,
+  "num_docs": 10389,
+  "device": "cuda",
+  "dtype": "float16",
+  "seconds": 0.1,
+  "preload": true,
+  "load_seconds": 0.0,
+  "metrics": {
+    "ndcg@10": 0.0037,
+    "recall@100": 0.0176,
+    "mrr@10": 0.0127
+  },
+  "qrels_split": "test"
+}

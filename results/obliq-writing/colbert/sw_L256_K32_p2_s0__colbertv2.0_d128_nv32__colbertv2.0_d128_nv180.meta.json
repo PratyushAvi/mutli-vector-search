@@ -13,9 +13,9 @@
   "excluded_ids": true,
   "num_queries": 512,
   "num_docs": 10389,
-  "device": "mps",
+  "device": "cuda",
   "dtype": "float16",
-  "seconds": 1.4,
+  "seconds": 0.2,
   "preload": true,
   "load_seconds": 0.0,
   "metrics": {
