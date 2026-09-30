@@ -12,9 +12,11 @@
   "ignore_identical_ids": true,
   "num_queries": 1406,
   "num_docs": 8674,
-  "device": "mps",
+  "device": "cuda",
   "dtype": "float16",
-  "seconds": 0.4,
+  "seconds": 0.1,
+  "preload": true,
+  "load_seconds": 0.0,
   "metrics": {
     "ndcg@10": 0.161,
     "recall@100": 0.6053,

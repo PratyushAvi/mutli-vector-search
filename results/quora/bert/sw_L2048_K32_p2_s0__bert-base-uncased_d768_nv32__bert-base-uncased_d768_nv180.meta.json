@@ -14,7 +14,9 @@
   "num_docs": 522931,
   "device": "cuda",
   "dtype": "float16",
-  "seconds": 107.9,
+  "seconds": 109.3,
+  "preload": true,
+  "load_seconds": 0.0,
   "metrics": {
     "ndcg@10": 0.609,
     "recall@100": 0.8601,

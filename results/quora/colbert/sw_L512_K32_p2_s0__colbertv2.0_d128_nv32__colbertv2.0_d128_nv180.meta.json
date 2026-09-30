@@ -1,0 +1,26 @@
+{
+  "dataset": "quora",
+  "encoder": "colbert",
+  "ranker": "sliced_wasserstein",
+  "slices": 512,
+  "quantiles": 32,
+  "p": 2,
+  "seed": 0,
+  "queries": "colbertv2.0_d128_nv32",
+  "corpus": "colbertv2.0_d128_nv180",
+  "k": 100,
+  "ignore_identical_ids": false,
+  "num_queries": 15000,
+  "num_docs": 522931,
+  "device": "cuda",
+  "dtype": "float16",
+  "seconds": 29.1,
+  "preload": true,
+  "load_seconds": 0.0,
+  "metrics": {
+    "ndcg@10": 0.7297,
+    "recall@100": 0.9287,
+    "mrr@10": 0.7257
+  },
+  "qrels_split": "test"
+}

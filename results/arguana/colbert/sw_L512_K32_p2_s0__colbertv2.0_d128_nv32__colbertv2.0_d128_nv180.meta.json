@@ -12,13 +12,15 @@
   "ignore_identical_ids": true,
   "num_queries": 1406,
   "num_docs": 8674,
-  "device": "mps",
+  "device": "cuda",
   "dtype": "float16",
-  "seconds": 2.2,
+  "seconds": 0.2,
+  "preload": true,
+  "load_seconds": 0.0,
   "metrics": {
-    "ndcg@10": 0.2741,
+    "ndcg@10": 0.2744,
     "recall@100": 0.7731,
-    "mrr@10": 0.2168
+    "mrr@10": 0.2172
   },
   "qrels_split": "test"
 }

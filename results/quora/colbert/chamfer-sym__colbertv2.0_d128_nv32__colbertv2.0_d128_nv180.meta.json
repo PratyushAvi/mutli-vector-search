@@ -1,0 +1,23 @@
+{
+  "dataset": "quora",
+  "encoder": "colbert",
+  "ranker": "chamfer",
+  "symmetric": true,
+  "queries": "colbertv2.0_d128_nv32",
+  "corpus": "colbertv2.0_d128_nv180",
+  "k": 100,
+  "ignore_identical_ids": false,
+  "num_queries": 15000,
+  "num_docs": 522931,
+  "device": "cuda",
+  "dtype": "float16",
+  "seconds": 153.4,
+  "preload": true,
+  "load_seconds": 0.0,
+  "metrics": {
+    "ndcg@10": 0.8098,
+    "recall@100": 0.98,
+    "mrr@10": 0.8033
+  },
+  "qrels_split": "test"
+}

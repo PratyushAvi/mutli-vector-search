@@ -1,0 +1,26 @@
+{
+  "dataset": "arguana",
+  "encoder": "colbert",
+  "ranker": "sliced_wasserstein",
+  "slices": 2048,
+  "quantiles": 32,
+  "p": 2,
+  "seed": 0,
+  "queries": "colbertv2.0_d128_nv32",
+  "corpus": "colbertv2.0_d128_nv180",
+  "k": 100,
+  "ignore_identical_ids": true,
+  "num_queries": 1406,
+  "num_docs": 8674,
+  "device": "cuda",
+  "dtype": "float16",
+  "seconds": 0.7,
+  "preload": true,
+  "load_seconds": 0.0,
+  "metrics": {
+    "ndcg@10": 0.2937,
+    "recall@100": 0.8087,
+    "mrr@10": 0.2327
+  },
+  "qrels_split": "test"
+}
