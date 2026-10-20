@@ -12,6 +12,11 @@ Point sources (each yields float64 blocks of about `chunk` rows):
 
 Both take optional sorted `items` indices, which `estimate_pr` uses for its sampling estimate.
 
+The covariance spectrum (eigenvalues of the centred d x d covariance) comes from the same sums, so
+`estimate_pr` returns it at no extra I/O: exact from a full pass, or from the sampled rows. With
+m sampled rows and m >> d (e.g. 1e6 rows, d = 256) the sample spectrum is close to the full one;
+for d/m not small, sample eigenvalues spread out (largest too large, smallest too small).
+
 Used by effective_dim.ipynb (.npy datasets) and effective_dim_obliq.ipynb (OBLIQ, mean pooled).
 Run `python src/effdim.py` for the sanity checks.
 """
@@ -71,6 +76,11 @@ class PRAccumulator:
         self.a1 += other.a1
         self.a2 += other.a2
         return self
+
+    def covariance(self):
+        """Centred covariance matrix (d x d, divided by n - 1)."""
+        delta = self.s1 / self.n
+        return (self.S - self.n * np.outer(delta, delta)) / (self.n - 1)
 
     def value(self):
         n, delta = self.n, self.s1 / self.n
@@ -145,8 +155,8 @@ def open_multivector(prefix):
     return V, offsets, json.loads(Path(f"{prefix}.meta.json").read_text())
 
 
-def stream_pr(blocks, total, label):
-    """Feed blocks of points into a PRAccumulator, printing progress."""
+def accumulate(blocks, total, label):
+    """Feed blocks of points into a PRAccumulator (returned), printing progress."""
     acc, done, step = PRAccumulator(), 0, max(1, total // 20)
     for X in blocks:
         acc.add(X)
@@ -154,26 +164,51 @@ def stream_pr(blocks, total, label):
             print(f"\r  {label}: {done + len(X):,}/{total:,} items", end="", flush=True)
         done += len(X)
     print("\r" + " " * 80 + "\r", end="")
-    return acc.value()
+    return acc
+
+
+def spectrum(cov):
+    """Eigenvalues of a covariance matrix, largest first (tiny negative round-off clipped to 0)."""
+    return np.clip(np.linalg.eigvalsh(cov)[::-1], 0, None)
+
+
+def spectrum_summary(lam, levels=(0.5, 0.9, 0.99)):
+    """Plug-in PR, share of variance in the top direction, and dimensions needed per variance level."""
+    share = lam / lam.sum()
+    cum = np.cumsum(share)
+    return {"spectrum PR": lam.sum() ** 2 / (lam**2).sum(), "top-1 share": share[0],
+            **{f"dims for {round(100 * q)}%": int(np.searchsorted(cum, q) + 1) for q in levels}}
 
 
 def estimate_pr(n, blocks, label, exact=True, sample=None, seeds=5, seed=0):
-    """PR of n points. `blocks(items)` yields point blocks (items=None: all n, else sorted indices).
+    """PR and covariance spectrum of n points. `blocks(items)` yields point blocks (items=None: all n,
+    else sorted indices).
 
     exact: one full pass ("PR"). sample: also estimate from `seeds` random subsets of that many points
-    ("sample PR mean" / "sample PR sd"), skipped when sample >= n. Returns a dict of the results.
+    ("sample PR mean" / "sample PR sd"). If sample >= n there is nothing to sample, so the full pass
+    runs even when exact is False.
+
+    Returns (results dict, spectrum, spectrum sd). The spectrum is exact when the full pass ran, else
+    the eigenvalues of the mean sample covariance, with the per-eigenvalue sd across samples.
     """
-    out = {}
-    if exact:
-        out["PR"] = stream_pr(blocks(None), n, label)
-    if sample and sample < n:
-        est = []
+    sampling = bool(sample) and sample < n
+    out, spec, spec_sd = {}, None, None
+    if exact or not sampling:
+        acc = accumulate(blocks(None), n, label)
+        out["PR"] = acc.value()
+        spec = spectrum(acc.covariance())
+    if sampling:
+        accs = []
         for s in range(seeds):
             items = np.sort(np.random.default_rng([seed, s]).choice(n, sample, replace=False))
-            est.append(stream_pr(blocks(items), sample, f"{label} sample {s}"))
+            accs.append(accumulate(blocks(items), sample, f"{label} sample {s}"))
+        est = [a.value() for a in accs]
         out |= {"sample size": sample, "sample PR mean": np.mean(est), "sample PR sd": np.std(est, ddof=1)}
+        if spec is None:
+            spec = spectrum(np.mean([a.covariance() for a in accs], axis=0))
+            spec_sd = np.std([spectrum(a.covariance()) for a in accs], axis=0, ddof=1)
     print(f"{label}: " + "  ".join(f"{k}={v:.1f}" for k, v in out.items() if "PR" in k) + f"  ({n:,} points)")
-    return out
+    return out, spec, spec_sd
 
 
 def _check():
@@ -195,6 +230,16 @@ def _check():
                        means[[0, 2, 4]])                # item 1 is empty and is dropped
     assert np.allclose(np.concatenate(list(row_blocks(X, chunk=777))), X)
     assert np.allclose(np.concatenate(list(row_blocks(X, np.array([2, 9, 4000]), chunk=2))), X[[2, 9, 4000]])
+    # Spectrum: matches numpy's covariance; its plug-in PR matches the U-statistic up to O(1/n).
+    assert np.allclose(acc.covariance(), np.cov(X, rowvar=False))
+    lam = spectrum(acc.covariance())
+    assert np.isclose(spectrum_summary(lam)["spectrum PR"], exact, rtol=1e-2)
+    out, spec, sd = estimate_pr(len(X), lambda items: row_blocks(X, items, 500), "check", exact=False,
+                                sample=2000, seeds=3)
+    assert sd is not None and np.allclose(spec, lam, rtol=0.25)   # sample spectrum near the full one
+    out, spec, sd = estimate_pr(len(X), lambda items: row_blocks(X, items, 500), "check", exact=False,
+                                sample=10**6)                    # sample >= n: full pass instead
+    assert "PR" in out and sd is None
     iso = participation_ratio(rng.standard_normal((20000, 64)))
     print(f"ok  anisotropic d=64: {exact:.2f}   isotropic d=64: {iso:.2f}")
 
