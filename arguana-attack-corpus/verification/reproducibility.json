@@ -1,0 +1,21 @@
+{
+  "separate_cli_runs_byte_identical": true,
+  "all_output_sha256": {
+    "README.md": "e1097e27574be1e3bc1c2c4e0d1215897755273bb20f5bcb3942c2788600bca6",
+    "attack_corpus_hub/corpus-00000-of-00001.parquet": "11872d2ff68a35ea72410bb24668cd6e8d8c7cb139558d90949a0f6fa6bd865d",
+    "attack_corpus_hub/manifest.jsonl": "cd321e66135ce25104fc83ecc1a967775a548d3b9fbd41226e8a97705a23cc01",
+    "attack_corpus_targeted/corpus-00000-of-00001.parquet": "8d1fddda2db6fc040dad08d387b8bafaef20ced531628edcd6563dc02fc9ce67",
+    "attack_corpus_targeted/manifest.jsonl": "6f90b853a2f3aa888cfc35d209b4f0a6e5ec8a88fff0172626a33391077175a8",
+    "attack_corpus_topic/corpus-00000-of-00001.parquet": "5a0923b6287cc4b907e5b0870fc28f37ffde3501f8d13346dca51b79cc39ade0",
+    "attack_corpus_topic/manifest.jsonl": "133028dfaf2c20cb04ee002a7129090ba4b371bd9e945251a3969b9abe9d06b0"
+  },
+  "protected_files_unchanged": true,
+  "tests": "9 passed",
+  "dependencies": {
+    "python": "3.11.6",
+    "numpy": "1.26.4",
+    "pandas": "2.2.1",
+    "pyarrow": "14.0.2",
+    "transformers": "4.37.2"
+  }
+}

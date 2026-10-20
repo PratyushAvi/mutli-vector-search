@@ -1,0 +1,44 @@
+{
+  "targeted": {
+    "documents": 1406,
+    "keyword_range": [
+      19,
+      60
+    ],
+    "short_queries": 399,
+    "schema_ids_carriers_layout": "passed",
+    "max_title_keyword_wordpieces": 120,
+    "max_tokens_including_specials_and_marker": 123,
+    "tokenizer": "/Users/apoorv/Documents/Codex/2026-10-01/referenced-chatgpt-conversation-this-is-an/work/bert-base-uncased",
+    "determinism": "byte-identical parquet and identical manifest records",
+    "parquet_sha256": "8d1fddda2db6fc040dad08d387b8bafaef20ced531628edcd6563dc02fc9ce67"
+  },
+  "topic": {
+    "documents": 1406,
+    "keyword_range": [
+      60,
+      60
+    ],
+    "short_queries": 0,
+    "schema_ids_carriers_layout": "passed",
+    "max_title_keyword_wordpieces": 90,
+    "max_tokens_including_specials_and_marker": 93,
+    "tokenizer": "/Users/apoorv/Documents/Codex/2026-10-01/referenced-chatgpt-conversation-this-is-an/work/bert-base-uncased",
+    "determinism": "byte-identical parquet and identical manifest records",
+    "parquet_sha256": "5a0923b6287cc4b907e5b0870fc28f37ffde3501f8d13346dca51b79cc39ade0"
+  },
+  "hub": {
+    "documents": 1406,
+    "keyword_range": [
+      60,
+      60
+    ],
+    "short_queries": 0,
+    "schema_ids_carriers_layout": "passed",
+    "max_title_keyword_wordpieces": 75,
+    "max_tokens_including_specials_and_marker": 78,
+    "tokenizer": "/Users/apoorv/Documents/Codex/2026-10-01/referenced-chatgpt-conversation-this-is-an/work/bert-base-uncased",
+    "determinism": "byte-identical parquet and identical manifest records",
+    "parquet_sha256": "11872d2ff68a35ea72410bb24668cd6e8d8c7cb139558d90949a0f6fa6bd865d"
+  }
+}

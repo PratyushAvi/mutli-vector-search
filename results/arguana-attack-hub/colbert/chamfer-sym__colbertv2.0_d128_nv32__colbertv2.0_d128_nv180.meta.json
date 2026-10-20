@@ -1,0 +1,25 @@
+{
+  "dataset": "arguana-attack-hub",
+  "encoder": "colbert",
+  "ranker": "chamfer",
+  "symmetric": true,
+  "queries": "colbertv2.0_d128_nv32",
+  "corpus": "colbertv2.0_d128_nv180",
+  "k": 100,
+  "ignore_identical_ids": true,
+  "excluded_ids": false,
+  "num_queries": 1406,
+  "num_docs": 10080,
+  "device": "mps",
+  "dtype": "float16",
+  "seconds": 43.6,
+  "preload": true,
+  "load_seconds": 0.0,
+  "metrics": {
+    "ndcg@10": 0.4019,
+    "recall@10": 0.6565,
+    "recall@100": 0.894,
+    "mrr@10": 0.3233
+  },
+  "qrels_split": "test"
+}
