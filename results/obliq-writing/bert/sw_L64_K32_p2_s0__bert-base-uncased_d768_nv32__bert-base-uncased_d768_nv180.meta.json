@@ -20,7 +20,7 @@
   "load_seconds": 0.0,
   "metrics": {
     "ndcg@10": 0.0068,
-    "recall@100": 0.0477,
+    "recall@10": 0.0072,
     "mrr@10": 0.0163
   },
   "qrels_split": "test"

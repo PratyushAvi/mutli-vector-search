@@ -15,12 +15,12 @@
   "num_docs": 72122,
   "device": "cuda",
   "dtype": "float16",
-  "seconds": 4.9,
+  "seconds": 2.6,
   "preload": true,
   "load_seconds": 0.0,
   "metrics": {
     "ndcg@10": 0.0004,
-    "recall@100": 0.0042,
+    "recall@10": 0.0005,
     "mrr@10": 0.0006
   },
   "qrels_split": "test"
