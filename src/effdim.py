@@ -6,11 +6,20 @@ For centred points x_i with covariance C, PR = (tr C)^2 / tr(C^2) = (sum_k l_k)^
 U-statistic version that leaves out the i = j terms; `PRAccumulator` gives the same value from
 running sums over blocks of points, so nothing is kept in memory and each file is read once.
 
-Point sources (each yields float64 blocks of about `chunk` rows):
-  row_blocks        one point per row of an (n, d) array, e.g. a single-vector vectors.npy
-  item_mean_blocks  one point per item, the mean of its token vectors (encode.py multi-vector layout)
+Point sources (each yields blocks of about `chunk` rows):
+  row_blocks        one point per row of an (n, d) array, e.g. a single-vector vectors.npy (rows keep
+                    their stored dtype, so a GPU receives e.g. uint8 and casts it there)
+  item_mean_blocks  one point per item, the float64 mean of its token vectors (encode.py layout)
 
 Both take optional sorted `items` indices, which `estimate_pr` uses for its sampling estimate.
+
+GPU: sums are accumulated with torch on `DEVICE` ("auto": CUDA if torch sees a GPU, else NumPy on
+the CPU; "numpy" forces the CPU path; any torch device such as "cuda:1" also works). `GPU_DTYPE` is
+the compute dtype there: "float64" (default) matches the CPU result; "float32" is much faster on GPUs
+with weak float64 (consumer cards; Apple "mps" only supports float32), with each block's sums added
+up in float64. Set them from a notebook with `effdim.DEVICE = ...` or per call via `device=`. At
+billion scale the pass is often limited by disk reads, not arithmetic, so the GPU helps most when
+the data is cached or on fast local storage.
 
 The covariance spectrum (eigenvalues of the centred d x d covariance) comes from the same sums, so
 `estimate_pr` returns it at no extra I/O: exact from a full pass, or from the sampled rows. With
@@ -26,7 +35,21 @@ from pathlib import Path
 
 import numpy as np
 
-CHUNK = 1 << 16  # rows read per block
+CHUNK = 1 << 16      # rows read per block
+DEVICE = "auto"      # "auto" (CUDA if available, else NumPy), "numpy", or a torch device like "cuda"
+GPU_DTYPE = "float64"  # compute dtype on a torch device: "float64" or "float32"
+
+
+def resolve_device(device=None):
+    """None -> DEVICE; "auto" -> "cuda" if torch sees a GPU, else "numpy"."""
+    device = DEVICE if device is None else device
+    if device != "auto":
+        return device
+    try:
+        import torch
+    except ImportError:
+        return "numpy"
+    return "cuda" if torch.cuda.is_available() else "numpy"
 
 
 def participation_ratio(X):          # X: n x d, rows are points
@@ -47,14 +70,29 @@ class PRAccumulator:
       sum (x - mu)(x - mu)^T = sum y y^T - n delta delta^T
       sum |x - mu|^2         = sum |y|^2 - n |delta|^2
       sum |x - mu|^4         = sum (a - 2b + e)^2,  a = |y|^2, b = <y, delta>, e = |delta|^2
+
+    `device`: "numpy" (CPU) or a torch device (sums stay on it as float64; see the module docstring).
     """
 
-    def __init__(self, shift=None):
+    def __init__(self, shift=None, device="numpy", dtype=None):
         self.shift = None if shift is None else np.asarray(shift, dtype=np.float64)
         self.n, self.a1, self.a2 = 0, 0.0, 0.0      # count, sum |y|^2, sum |y|^4
         self.s1 = self.S = self.m3 = 0.0            # sum y, sum y y^T, sum |y|^2 y
+        self.device = device
+        if device != "numpy":
+            import torch
+            self._dtype = getattr(torch, dtype or GPU_DTYPE)
+            if torch.device(device).type == "mps" and self._dtype == torch.float64:
+                raise ValueError('mps has no float64: use dtype="float32" (or effdim.GPU_DTYPE)')
+            if (self._dtype == torch.float32 and torch.device(device).type == "cuda"
+                    and torch.backends.cuda.matmul.allow_tf32):
+                print("warning: TF32 matmuls are enabled (torch.backends.cuda.matmul.allow_tf32), "
+                      "which lowers float32 accuracy")
+            self._shift_t = None
 
     def add(self, X):
+        if self.device != "numpy":
+            return self._add_torch(X)
         X = np.asarray(X, dtype=np.float64)
         if self.shift is None:
             self.shift = X.mean(0)
@@ -68,38 +106,75 @@ class PRAccumulator:
         self.a2 += (a * a).sum()
         return self
 
+    def _add_torch(self, X):
+        import torch
+        X = np.asarray(X)
+        if not (X.flags.writeable and X.flags.c_contiguous):
+            X = np.array(X)                                  # memmap slices are read-only
+        if self.shift is None:                               # first block only; float64 on the CPU
+            self.shift = X.astype(np.float64).mean(0)
+        T = torch.from_numpy(X).to(self.device)              # copy in the stored dtype, cast on device
+        if self._shift_t is None:
+            self._shift_t = torch.as_tensor(self.shift, dtype=self._dtype, device=self.device)
+        Y = T.to(self._dtype) - self._shift_t
+        a = (Y * Y).sum(1)
+        # Running sums are float64: on the device, or on the CPU for devices without float64 (mps),
+        # in which case only each block's d x d partial sums are copied back.
+        home = "cpu" if torch.device(self.device).type == "mps" else self.device
+        f64 = lambda t: t.to(home).double()
+        self.n += len(Y)
+        self.s1 = self.s1 + f64(Y.sum(0))
+        self.S = self.S + f64(Y.T @ Y)
+        self.m3 = self.m3 + f64(a @ Y)
+        self.a1 = self.a1 + f64(a).sum()
+        self.a2 = self.a2 + (f64(a) ** 2).sum()
+        return self
+
     def merge(self, other):
         """Add another accumulator's sums (same shift required, e.g. one per shard or worker)."""
         assert np.array_equal(self.shift, other.shift), "accumulators must share a shift"
-        self.n += other.n
-        self.s1, self.S, self.m3 = self.s1 + other.s1, self.S + other.S, self.m3 + other.m3
-        self.a1 += other.a1
-        self.a2 += other.a2
+        n, s1, S, m3, a1, a2 = other._sums()
+        if hasattr(self.S, "cpu"):                           # torch sums: bring other's next to them
+            import torch
+            to = lambda v: torch.as_tensor(v, device=self.S.device, dtype=torch.float64)
+            s1, S, m3, a1, a2 = map(to, (s1, S, m3, a1, a2))
+        self.n += n
+        self.s1, self.S, self.m3 = self.s1 + s1, self.S + S, self.m3 + m3
+        self.a1 = self.a1 + a1
+        self.a2 = self.a2 + a2
         return self
+
+    def _sums(self):
+        """(n, sum y, sum y y^T, sum |y|^2 y, sum |y|^2, sum |y|^4) as float64 NumPy values."""
+        host = lambda v: v.cpu().double().numpy() if hasattr(v, "cpu") else np.asarray(v, dtype=np.float64)
+        return (self.n, *map(host, (self.s1, self.S, self.m3)), *(float(host(v)) for v in (self.a1, self.a2)))
 
     def covariance(self):
         """Centred covariance matrix (d x d, divided by n - 1)."""
-        delta = self.s1 / self.n
-        return (self.S - self.n * np.outer(delta, delta)) / (self.n - 1)
+        n, s1, S, _, _, _ = self._sums()
+        delta = s1 / n
+        return (S - n * np.outer(delta, delta)) / (n - 1)
 
     def value(self):
-        n, delta = self.n, self.s1 / self.n
+        n, s1, S, m3, a1, a2 = self._sums()
+        delta = s1 / n
         e = delta @ delta
-        C = self.S - n * np.outer(delta, delta)                 # sum of centred outer products
-        sq_sum = self.a1 - n * e                                # sum |x - mu|^2
-        b1, b2, ab = delta @ self.s1, delta @ self.S @ delta, delta @ self.m3
-        sq2_sum = self.a2 + 4 * b2 + n * e * e - 4 * ab + 2 * e * self.a1 - 4 * e * b1   # sum |x - mu|^4
+        C = S - n * np.outer(delta, delta)                      # sum of centred outer products
+        sq_sum = a1 - n * e                                     # sum |x - mu|^2
+        b1, b2, ab = delta @ s1, delta @ S @ delta, delta @ m3
+        sq2_sum = a2 + 4 * b2 + n * e * e - 4 * ab + 2 * e * a1 - 4 * e * b1   # sum |x - mu|^4
         G2 = (C * C).sum() - sq2_sum
         T2 = sq_sum**2 - sq2_sum
         return T2 / G2
 
 
 def row_blocks(V, items=None, chunk=CHUNK):
-    """Yield float64 rows of V (one point per row): all of them, or the sorted indices `items`."""
+    """Yield rows of V in their stored dtype (one point per row): all of them, or the sorted indices
+    `items`. PRAccumulator casts them (on the GPU when one is used, which keeps transfers small)."""
     n = len(V) if items is None else len(items)
     for s in range(0, n, chunk):
         idx = slice(s, s + chunk) if items is None else items[s : s + chunk]
-        yield np.asarray(V[idx], dtype=np.float64)
+        yield np.asarray(V[idx])
 
 
 def item_mean_blocks(V, offsets, items=None, chunk=CHUNK):
@@ -155,9 +230,9 @@ def open_multivector(prefix):
     return V, offsets, json.loads(Path(f"{prefix}.meta.json").read_text())
 
 
-def accumulate(blocks, total, label):
-    """Feed blocks of points into a PRAccumulator (returned), printing progress."""
-    acc, done, step = PRAccumulator(), 0, max(1, total // 20)
+def accumulate(blocks, total, label, device="numpy", dtype=None):
+    """Feed blocks of points into a PRAccumulator on `device` (returned), printing progress."""
+    acc, done, step = PRAccumulator(device=device, dtype=dtype), 0, max(1, total // 20)
     for X in blocks:
         acc.add(X)
         if (done + len(X)) // step > done // step:
@@ -180,34 +255,36 @@ def spectrum_summary(lam, levels=(0.5, 0.9, 0.99)):
             **{f"dims for {round(100 * q)}%": int(np.searchsorted(cum, q) + 1) for q in levels}}
 
 
-def estimate_pr(n, blocks, label, exact=True, sample=None, seeds=5, seed=0):
+def estimate_pr(n, blocks, label, exact=True, sample=None, seeds=5, seed=0, device=None, dtype=None):
     """PR and covariance spectrum of n points. `blocks(items)` yields point blocks (items=None: all n,
     else sorted indices).
 
     exact: one full pass ("PR"). sample: also estimate from `seeds` random subsets of that many points
     ("sample PR mean" / "sample PR sd"). If sample >= n there is nothing to sample, so the full pass
-    runs even when exact is False.
+    runs even when exact is False. device / dtype: where to accumulate (default DEVICE / GPU_DTYPE).
 
     Returns (results dict, spectrum, spectrum sd). The spectrum is exact when the full pass ran, else
     the eigenvalues of the mean sample covariance, with the per-eigenvalue sd across samples.
     """
+    device = resolve_device(device)
     sampling = bool(sample) and sample < n
     out, spec, spec_sd = {}, None, None
     if exact or not sampling:
-        acc = accumulate(blocks(None), n, label)
+        acc = accumulate(blocks(None), n, label, device, dtype)
         out["PR"] = acc.value()
         spec = spectrum(acc.covariance())
     if sampling:
         accs = []
         for s in range(seeds):
             items = np.sort(np.random.default_rng([seed, s]).choice(n, sample, replace=False))
-            accs.append(accumulate(blocks(items), sample, f"{label} sample {s}"))
+            accs.append(accumulate(blocks(items), sample, f"{label} sample {s}", device, dtype))
         est = [a.value() for a in accs]
         out |= {"sample size": sample, "sample PR mean": np.mean(est), "sample PR sd": np.std(est, ddof=1)}
         if spec is None:
             spec = spectrum(np.mean([a.covariance() for a in accs], axis=0))
             spec_sd = np.std([spectrum(a.covariance()) for a in accs], axis=0, ddof=1)
-    print(f"{label}: " + "  ".join(f"{k}={v:.1f}" for k, v in out.items() if "PR" in k) + f"  ({n:,} points)")
+    print(f"{label}: " + "  ".join(f"{k}={v:.1f}" for k, v in out.items() if "PR" in k)
+          + f"  ({n:,} points, {device})")
     return out, spec, spec_sd
 
 
@@ -235,11 +312,30 @@ def _check():
     lam = spectrum(acc.covariance())
     assert np.isclose(spectrum_summary(lam)["spectrum PR"], exact, rtol=1e-2)
     out, spec, sd = estimate_pr(len(X), lambda items: row_blocks(X, items, 500), "check", exact=False,
-                                sample=2000, seeds=3)
+                                sample=2000, seeds=3, device="numpy")
     assert sd is not None and np.allclose(spec, lam, rtol=0.25)   # sample spectrum near the full one
     out, spec, sd = estimate_pr(len(X), lambda items: row_blocks(X, items, 500), "check", exact=False,
-                                sample=10**6)                    # sample >= n: full pass instead
+                                sample=10**6, device="numpy")    # sample >= n: full pass instead
     assert "PR" in out and sd is None
+
+    # torch path (if installed): float64 on any device matches NumPy; float32 is close.
+    try:
+        import torch
+    except ImportError:
+        torch = None
+    if torch is not None:
+        U = (rng.standard_normal((5000, 64)) * 20 + 128).clip(0, 255).astype(np.uint8)   # stored-dtype rows
+        ref = participation_ratio(U.astype(np.float64))
+        devices = [("cpu", "float64")] + [("cuda", "float64"), ("cuda", "float32")] * torch.cuda.is_available() \
+                  + [("mps", "float32")] * torch.backends.mps.is_available()
+        for dev, dt in devices:
+            a = accumulate(row_blocks(U, chunk=777), len(U), f"check {dev} {dt}", dev, dt)
+            b = PRAccumulator(device=dev, dtype=dt).add(U[:2000])
+            b.merge(PRAccumulator(b.shift, device="numpy").add(U[2000:]))          # mixed-device merge
+            tol = 1e-9 if dt == "float64" else 1e-3
+            assert np.isclose(a.value(), ref, rtol=tol) and np.isclose(b.value(), ref, rtol=tol), (dev, dt)
+            assert np.allclose(a.covariance(), np.cov(U.astype(np.float64), rowvar=False), rtol=tol * 10, atol=tol)
+            print(f"ok  torch {dev} {dt}: PR={a.value():.4f} (NumPy {ref:.4f})")
     iso = participation_ratio(rng.standard_normal((20000, 64)))
     print(f"ok  anisotropic d=64: {exact:.2f}   isotropic d=64: {iso:.2f}")
 
