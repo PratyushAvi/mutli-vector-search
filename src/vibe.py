@@ -4,8 +4,12 @@ VIBE dataset vs a Gaussian with the same covariance spectrum: robust-prune graph
 Shared by vibe_robust_prune.ipynb (interactive, with plots) and vibe_pipeline.py (batch / SLURM). Both
 write the same files to graph_dir, so either one picks up what the other has already computed:
 
+  <name>-meta.json                             n, d, distance and the run's settings
   <name>-spectrum.npy                          dataset covariance eigenvalues; the Gaussian is built from these
-  adj-list-<name>-alpha1-euclidean.txt         one line per source: "source [neighbor1, neighbor2, ...]"
+  <name>-gaussian-spectrum.npy                 the Gaussian's own sample covariance eigenvalues
+  adj-list-<name>-alpha1-euclidean.txt         one line per source: "source [(neighbor, uncovered), ...]", where
+                                               uncovered = points still uncovered once that edge is added
+                                               (the format of simulrun.py); the last one is 0
   <name>-alpha1-euclidean-computed.txt         sources already done (an interrupted run resumes)
   adj-list-<name>-gaussian-alpha1-...          the same two files for the synthetic Gaussian
   <name>-results.csv                           spectrum and graph statistics, one row per dataset
@@ -215,8 +219,10 @@ def graph_paths(graph_dir, name, alpha=1.0):
 
 def build_graph(X, name, graph_dir, prune_fns, alpha=1.0, batch_size=512, seed=0, mininterval=0.1):
     """Robust-prune graph of X, appended to the adjacency list one batch at a time in a seeded shuffled
-    order. Sources already in the computed file are skipped, so an interrupted run resumes; a finished
-    graph is not recomputed. Returns the adjacency list path."""
+    order. Each line is "source [(neighbor, uncovered), ...]": the neighbors in the order the prune added
+    them, each with the number of points still uncovered after that edge. Sources already in the computed
+    file are skipped, so an interrupted run resumes; a finished graph is not recomputed. Returns the
+    adjacency list path."""
     prune, augment, cp = prune_fns
     adj_path, computed_path = graph_paths(graph_dir, name, alpha)
     adj_path.parent.mkdir(parents=True, exist_ok=True)
@@ -235,7 +241,7 @@ def build_graph(X, name, graph_dir, prune_fns, alpha=1.0, batch_size=512, seed=0
         # Whole batch at once; a crash loses at most one batch (computed is written after adj).
         with open(adj_path, "a") as adj, open(computed_path, "a") as comp:
             for source, hood in zip(batch, neighborhoods):
-                adj.write(f"{source} {[v for v, _ in hood]}\n")
+                adj.write(f"{source} {hood}\n")       # hood: [(neighbor, uncovered after it), ...]
             comp.write("".join(f"{source}\n" for source in batch))
     del data, X_aug
     if cp is not None:
@@ -245,14 +251,23 @@ def build_graph(X, name, graph_dir, prune_fns, alpha=1.0, batch_size=512, seed=0
 
 ### Statistics ###
 
-def read_graph(adj_path):
-    """{source: neighbor array} from an adjacency list. A source written twice (a run interrupted between
-    writing a batch's lines and its computed list) keeps its last line."""
+def read_graph(adj_path, uncovered=False):
+    """{source: neighbor array} from an adjacency list, or with uncovered=True {source: (neighbors,
+    uncovered counts)}. Reads "source [(neighbor, uncovered), ...]" lines and the older
+    "source [neighbor, ...]" lines (uncovered counts -1). A source written twice (a run interrupted
+    between writing a batch's lines and its computed list) keeps its last line."""
     hoods = {}
     with open(adj_path) as f:
         for line in f:
             source, rest = line.split(" ", 1)
-            hoods[int(source)] = np.fromstring(rest.strip()[1:-1], dtype=np.int64, sep=",")
+            body = rest.strip()[1:-1]
+            if "(" in body:
+                pairs = np.fromstring(body.replace("(", "").replace(")", ""), dtype=np.int64, sep=",")
+                nbrs, unc = pairs[0::2], pairs[1::2]
+            else:
+                nbrs = np.fromstring(body, dtype=np.int64, sep=",")
+                unc = np.full(len(nbrs), -1, dtype=np.int64)
+            hoods[int(source)] = (nbrs, unc) if uncovered else nbrs
     return hoods
 
 
@@ -289,3 +304,67 @@ def summarize(name, graphs, spectra, n, d, graph_dir, reciprocity=True):
     results = pd.DataFrame(rows)
     results.to_csv(Path(graph_dir) / f"{name}-results.csv", index=False)
     return results, out_degrees
+
+
+### Reading runs back (the visualizer notebooks) ###
+
+def save_meta(graph_dir, name, **info):
+    """Write <name>-meta.json (n, d, distance, settings) so a run can be inspected without its data."""
+    path = Path(graph_dir) / f"{name}-meta.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(info, indent=2, default=str))
+
+
+def find_runs(graph_dir):
+    """Names of every run in graph_dir: anything with a <name>-spectrum.npy (written as soon as a run has
+    loaded its data) or a <name>-results.csv (written when it finishes)."""
+    gd = Path(graph_dir)
+    spectra = {p.name.removesuffix("-spectrum.npy") for p in gd.glob("*-spectrum.npy")
+               if not p.name.endswith("-gaussian-spectrum.npy")}
+    results = {p.name.removesuffix("-results.csv") for p in gd.glob("*-results.csv")}
+    return sorted(spectra | results)
+
+
+def run_info(graph_dir, name, alpha=1.0):
+    """What is saved for one run: meta, dataset spectrum (None if missing), results table (None until
+    finished), and for each graph its adjacency path and number of sources done. n and d come from the
+    meta file, the results table or the spectrum, and are None if none of them has it."""
+    gd = Path(graph_dir)
+    meta_path, results_path, spectrum_path = (gd / f"{name}-meta.json", gd / f"{name}-results.csv",
+                                              gd / f"{name}-spectrum.npy")
+    meta = json.loads(meta_path.read_text()) if meta_path.exists() else {}
+    results = pd.read_csv(results_path) if results_path.exists() else None
+    lam = np.load(spectrum_path) if spectrum_path.exists() else None
+    n = meta.get("n") or (int(results["n"].iloc[0]) if results is not None else None)
+    d = meta.get("d") or (len(lam) if lam is not None else int(results["d"].iloc[0]) if results is not None else None)
+    graphs = {}
+    for label, graph_name in (("dataset", name), ("gaussian", f"{name}-gaussian")):
+        adj_path, computed_path = graph_paths(gd, graph_name, alpha)
+        done = len(set(computed_path.read_text().split())) if computed_path.exists() else 0
+        graphs[label] = (adj_path, done)
+    return {"name": name, "meta": meta, "n": n, "d": d, "lam": lam, "results": results, "graphs": graphs}
+
+
+def gaussian_spectrum(graph_dir, name, lam, n, seed=0):
+    """The Gaussian's sample spectrum: saved by the pipeline, or regenerated from the dataset spectrum
+    (needs n; n x d float32 in memory) and saved. None if n or the dataset spectrum is unknown."""
+    path = Path(graph_dir) / f"{name}-gaussian-spectrum.npy"
+    if path.exists():
+        return np.load(path)
+    if n is None or lam is None:
+        return None
+    lam_syn, _ = sample_spectrum(gaussian_like(lam, n, seed), "gaussian")
+    np.save(path, lam_syn)
+    return lam_syn
+
+
+def coverage_curve(hoods, n):
+    """Mean fraction of the other n - 1 points still uncovered after k edges, k = 1 .. max out-degree
+    (a source whose neighborhood is complete counts as 0). hoods: read_graph(..., uncovered=True).
+    None for graphs in the old format, which has no uncovered counts."""
+    unc = [u for _, u in hoods.values()]
+    if any(len(u) and u[0] < 0 for u in unc):
+        return None
+    lens = np.fromiter(map(len, unc), dtype=np.int64, count=len(unc))
+    pos = np.arange(lens.sum()) - np.repeat(np.cumsum(lens) - lens, lens)     # edge index within its source
+    return np.bincount(pos, weights=np.concatenate(unc)) / len(unc) / (n - 1)

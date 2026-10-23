@@ -17,9 +17,11 @@ import argparse
 import time
 from pathlib import Path
 
+import numpy as np
+
 from paths import RESULTS_DIR
 from vibe import (build_graph, cuda_available, dataset_spectrum, describe, download, gaussian_like,
-                  load_prune, load_train, sample_spectrum, summarize)
+                  load_prune, load_train, sample_spectrum, save_meta, summarize)
 
 
 def main():
@@ -62,10 +64,14 @@ def main():
     X, name, _ = load_train(path, args.max_points, args.seed)
     n, d = X.shape
     print(f"{name}: {n:,} x {d} float32 ({X.nbytes / 1e9:.2f} GB)", flush=True)
+    save_meta(args.graph_dir, name, dataset=args.dataset, n=n, d=d, distance=attrs.get("distance"),
+              point_type=attrs.get("point_type"), max_points=args.max_points, seed=args.seed, alpha=args.alpha,
+              file=path)
 
     lam, d_eff = dataset_spectrum(X, name, args.graph_dir)
     X_syn = gaussian_like(lam, n, args.seed)
     lam_syn, d_eff_syn = sample_spectrum(X_syn, "gaussian")
+    np.save(args.graph_dir / f"{name}-gaussian-spectrum.npy", lam_syn)
     print(f"d_eff = {d_eff:.1f} (d_eff / d = {d_eff / d:.3f}); Gaussian sample d_eff = {d_eff_syn:.1f}", flush=True)
 
     graphs = {}
