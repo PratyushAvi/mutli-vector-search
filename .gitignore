@@ -3,7 +3,13 @@ __pycache__/
 *.pyc
 .ipynb_checkpoints/
 slurm_out/
-results/
+results/*
+# local_dim results are tracked, except the large per-source vector arrays and resume parts
+!results/local_dim/
+results/local_dim/**/nbr_vectors.npy
+results/local_dim/**/nbr_sq_dists.npy
+results/local_dim/**/source_vectors.npy
+results/local_dim/**/part-*.npz
 
 # Gemini API key for src/llm_rank.py
 gemini_api_key.txt
