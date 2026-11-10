@@ -1,0 +1,233 @@
+"""
+Local effective dimension vs out-degree as a batch job. effective_dim.ipynb ("Local effective dimension vs
+out-degree") reads what this writes and makes the tables and plots.
+
+For each dataset folder (holding vectors.npy) and its graph, GRAPH_DIR/adj-list-<name>.txt and
+GRAPH_DIR/<name>-computed.txt with <name> the folder name (line i of the adjacency list is the
+out-neighbourhood of the point on line i of the computed file):
+  1. sources = the points with a computed out-neighbourhood; out-degree = neighbours on their line
+  2. one sequential pass over vectors.npy per group of sources: the exact K = max(k) nearest neighbours of
+     each source (squared Euclidean, itself excluded), keeping their vectors rather than their ids
+  3. local PR of the k nearest, for every k in the grid and both centrings ("mean", "v"; see localdim.py)
+
+Sizes follow the memory available (printed at the start of each dataset):
+  host RAM (the smallest of MemAvailable, the cgroup / SLURM limit) x --host-mem-fraction: two read
+      buffers of `chunk` rows (the next block is read while the GPU works on the current one)
+  free GPU memory x --gpu-mem-fraction: the group of sources whose running top K (vectors + distances)
+      stays on the GPU during a pass (at most half of it), then the query batch and `chunk` that fit in the
+      rest. More sources than one group holds means one pass over the file per group.
+
+Writes OUT_DIR/<name>/ (resumes: groups with a part file are skipped):
+  meta.json            dataset, graph files, n, d, dtype, rows, ks, estimator, sources, groups, sizes
+  sources.npy          source row ids (sorted); out_degree.npy: their out-degrees
+  source_vectors.npy   (q, d) the sources' vectors, in the file's dtype
+  nbr_vectors.npy      (q, K, d) the K nearest neighbours' vectors, nearest first, in the file's dtype
+  nbr_sq_dists.npy     (q, K) float32 squared distances to them
+  part-<g>.npz         local PR of group g; local_pr.csv: everything, one row per source (when all are done)
+
+Usage:
+  python src/local_dim_pipeline.py --graph-dir $SCRATCH/ANN-Search/graphs \\
+      --dataset $SCRATCH/ANN-Search/datasets/bigann --dataset $SCRATCH/ANN-Search/datasets/spacev1b
+  python src/local_dim_pipeline.py --graph-dir ... --dataset .../bigann --rows bigann=10000000 --max-sources 5000
+"""
+
+import argparse
+import hashlib
+import json
+import time
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+from numpy.lib.format import open_memmap
+
+import localdim
+from localdim import log
+from paths import RESULTS_DIR
+
+K_BASE = [16, 32, 64, 128, 256, 512, 1024, 2048]
+
+
+def gib(b):
+    return f"{b / 2**30:.1f} GiB"
+
+
+def plan(nq, K, d, itemsize, rows, device, host_frac, gpu_frac, max_chunk, pr_itemsize):
+    """Group size, query batch, chunk rows and PR batch from the memory available now."""
+    host = localdim.host_available_bytes() * host_frac
+    on_gpu = str(device).startswith("cuda")
+    dev = localdim.device_free_bytes(device) * gpu_frac if on_gpu else host * 0.75
+    buf_budget = host * 0.25 if not on_gpu else host           # on CPU the "device" shares host RAM
+    per_src = K * (4 + d * itemsize) + d * (4 + itemsize) + 8   # running top K + the query itself
+    group = int(min(nq, (dev * 0.5) // per_src))
+    if group < 1:
+        raise MemoryError(f"one source needs {gib(per_src)} of device memory for K={K}; have {gib(dev)}")
+    work = dev - group * per_src
+    qb = min(group, 4096)
+    while True:
+        per_row = d * (itemsize + 4) + 4 + qb * 4 * 2           # raw + float block, norms, distances + topk
+        merge = qb * (K * (d * itemsize + 4 * 3 + 8 * 3) + min(K, max_chunk) * 12)
+        chunk = int(min((work - merge) // per_row, buf_budget // (2 * d * itemsize), max_chunk, rows))
+        if chunk >= 8192 or qb == 1:
+            break
+        qb //= 2
+    if chunk < 1:
+        raise MemoryError(f"no room for a block: device {gib(dev)}, host {gib(host)}")
+    pr_per_src = 3 * K * d * pr_itemsize + 2 * min(K, d) ** 2 * pr_itemsize
+    pr_batch = int(max(1, min(group, (dev - group * per_src) // pr_per_src)))
+    return {"host budget": host, "device budget": dev, "group": group, "query batch": qb, "chunk": chunk,
+            "pr batch": pr_batch, "per source": per_src}
+
+
+def fingerprint(a):
+    return hashlib.sha1(np.ascontiguousarray(a).tobytes()).hexdigest()
+
+
+def run_dataset(folder, args):
+    folder = Path(folder)
+    name = folder.name
+    adj, computed = args.graph_dir / f"adj-list-{name}.txt", args.graph_dir / f"{name}-computed.txt"
+    missing = [str(p) for p in (adj, computed) if not p.exists()]
+    if missing:
+        msg = f"{name}: missing {', '.join(missing)}"
+        if args.skip_missing:
+            log(msg + "; skipped")
+            return
+        raise FileNotFoundError(msg)
+    t0 = time.time()
+    f = localdim.NpyFile(folder / "vectors.npy")
+    n, d = f.shape
+    rows = args.rows.get(name, n)
+    out = args.out_dir / (name + (f"-n{rows}" if rows != n else ""))
+    out.mkdir(parents=True, exist_ok=True)
+
+    log(f"{name}: reading graph files {adj} and {computed}")
+    sources, out_deg = localdim.computed_out_degrees(adj, computed)
+    log(f"{name}: {len(sources):,} sources with a computed out-neighbourhood")
+    assert len(sources), f"{name}: no sources in {computed}"
+    assert sources[-1] < rows, f"{name}: source {sources[-1]} is outside the first {rows:,} rows"
+    if args.max_sources is not None and args.max_sources < len(sources):
+        keep = np.sort(np.random.default_rng(args.seed).choice(len(sources), args.max_sources, replace=False))
+        sources, out_deg = sources[keep], out_deg[keep]
+    ks = localdim.k_grid(args.k, d, args.k_d_relative, rows)
+    K, q = ks[-1], len(sources)
+    device = localdim.resolve_device(args.device)
+    p = plan(q, K, d, f.dtype.itemsize, rows, device, args.host_mem_fraction, args.gpu_mem_fraction,
+             args.max_chunk, np.dtype(args.pr_dtype).itemsize)
+    meta_path = out / "meta.json"
+    old = json.loads(meta_path.read_text()) if meta_path.exists() and not args.overwrite else None
+    if old is not None and old.get("group") and old["group"] != p["group"]:
+        # resuming: part files are per group, so keep the earlier grouping
+        log(f"{name}: resuming with the earlier group size {old['group']:,} (planned {p['group']:,} now)")
+        p["group"] = old["group"]
+        p["pr batch"] = min(p["pr batch"], p["group"])
+    groups = [(a, min(a + p["group"], q)) for a in range(0, q, p["group"])]
+    log(f"{name}: {q:,} sources, {rows:,} x {d} {f.dtype} points, k = {ks}, device {device}\n"
+          f"  budgets: host {gib(p['host budget'])}, device {gib(p['device budget'])}; "
+          f"{gib(p['per source'])} per source\n"
+          f"  {len(groups)} pass(es) of up to {p['group']:,} sources; chunk {p['chunk']:,} rows "
+          f"({gib(p['chunk'] * d * f.dtype.itemsize)}), query batch {p['query batch']:,}, PR batch {p['pr batch']:,}")
+
+    meta = {"dataset": str(folder), "adj": str(adj), "computed": str(computed), "n": n, "d": d,
+            "dtype": str(f.dtype), "rows": rows, "ks": ks, "K": K, "centres": list(localdim.CENTRES),
+            "estimator": args.estimator, "pr dtype": args.pr_dtype, "sources": q, "sources sha1": fingerprint(sources),
+            "max sources": args.max_sources, "seed": args.seed, "group": p["group"], "groups": len(groups)}
+    if old is not None:
+        keys = ("rows", "ks", "estimator", "pr dtype", "sources sha1")
+        if any(old.get(k) != meta[k] for k in keys):
+            raise SystemExit(f"{out} holds a run with different settings ({', '.join(k for k in keys if old.get(k) != meta[k])}); "
+                             "pass --overwrite or a different --out-dir")
+    else:
+        for part in out.glob("part-*.npz"):
+            part.unlink()
+    meta_path.write_text(json.dumps(meta, indent=2))
+    np.save(out / "sources.npy", sources)
+    np.save(out / "out_degree.npy", out_deg)
+
+    def memmap(fname, shape, dtype):
+        path = out / fname
+        if path.exists() and not args.overwrite:
+            m = np.load(path, mmap_mode="r+")
+            if m.shape == shape and m.dtype == dtype:
+                return m
+        return open_memmap(path, mode="w+", shape=shape, dtype=dtype)
+
+    src_v = memmap("source_vectors.npy", (q, d), f.dtype)
+    nbr_v = memmap("nbr_vectors.npy", (q, K, d), f.dtype)
+    nbr_d = memmap("nbr_sq_dists.npy", (q, K), np.float32)
+
+    import torch
+    for g, (a, b) in enumerate(groups):
+        part = out / f"part-{g}.npz"
+        if part.exists():
+            log(f"{name}: group {g + 1}/{len(groups)} already done, skipped")
+            continue
+        log(f"{name}: group {g + 1}/{len(groups)}: reading {b - a:,} source vectors")
+        Q_raw = f.rows(sources[a:b])
+        src_v[a:b] = Q_raw
+        best_v, best_d = localdim.knn_vectors(f, rows, sources[a:b], Q_raw, K, device, p["chunk"], p["query batch"],
+                                              mininterval=args.progress_every)
+        log(f"{name}: group {g + 1}/{len(groups)}: writing neighbour vectors to {out / 'nbr_vectors.npy'}")
+        step = max(1, (1 << 30) // max(1, K * d * f.dtype.itemsize))   # copy back ~1 GiB at a time
+        for s in range(0, b - a, step):
+            e = min(s + step, b - a)
+            nbr_v[a + s : a + e] = best_v[s:e].cpu().numpy()
+            nbr_d[a + s : a + e] = best_d[s:e].cpu().numpy()
+        nbr_v.flush(), nbr_d.flush(), src_v.flush()
+
+        log(f"{name}: group {g + 1}/{len(groups)}: local PR for {len(ks)} k values x {len(localdim.CENTRES)} centrings")
+        Qt = torch.as_tensor(Q_raw, device=device)
+        pr = {key: np.empty(b - a) for key in ((c, k) for c in localdim.CENTRES for k in ks)}
+        for s in range(0, b - a, p["pr batch"]):
+            e = min(s + p["pr batch"], b - a)
+            for key, val in localdim.local_pr_batch(best_v[s:e], Qt[s:e], ks, localdim.CENTRES,
+                                                    args.estimator, args.pr_dtype).items():
+                pr[key][s:e] = val
+        np.savez(part, **{f"pr_{c}_k{k}": v for (c, k), v in pr.items()})   # written last: marks the group done
+        del best_v, best_d, Qt
+        if device.startswith("cuda"):
+            torch.cuda.empty_cache()
+        log(f"{name}: group {g + 1}/{len(groups)} done ({localdim._hms(time.time() - t0)} so far)")
+
+    parts = [np.load(out / f"part-{g}.npz") for g in range(len(groups))]
+    cols = {key: np.concatenate([z[key] for z in parts]) for key in parts[0].files}
+    df = pd.DataFrame({"source": sources, "out_degree": out_deg} | cols)
+    df.to_csv(out / "local_pr.csv", index=False)
+    log(f"{name}: wrote {out / 'local_pr.csv'} ({localdim._hms(time.time() - t0)})")
+
+
+def main():
+    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--dataset", action="append", required=True, type=Path,
+                   help="dataset folder holding vectors.npy (repeat for several)")
+    p.add_argument("--graph-dir", required=True, type=Path,
+                   help="folder with adj-list-<name>.txt and <name>-computed.txt for each dataset")
+    p.add_argument("--out-dir", type=Path, default=RESULTS_DIR / "local_dim",
+                   help="results go to OUT_DIR/<name>/ (default: results/local_dim, as in the notebook)")
+    p.add_argument("--rows", action="append", default=[], metavar="NAME=N",
+                   help="the graph of dataset NAME was built on its first N points (repeatable)")
+    p.add_argument("--max-sources", type=int, help="a seeded random subset of this many sources")
+    p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--k", type=int, nargs="+", default=K_BASE, help=f"k grid (default {K_BASE})")
+    p.add_argument("--k-d-relative", type=float, nargs="*", default=[0.5, 1, 2],
+                   help="also k = round(f * d) for each f (default 0.5 1 2)")
+    p.add_argument("--estimator", choices=["plugin", "u"], default="plugin")
+    p.add_argument("--pr-dtype", choices=["float64", "float32"], default="float64")
+    p.add_argument("--device", default="auto", help='"auto" (CUDA if available), "cpu", "cuda:1", ...')
+    p.add_argument("--host-mem-fraction", type=float, default=0.5, help="share of available RAM to use")
+    p.add_argument("--gpu-mem-fraction", type=float, default=0.85, help="share of free GPU memory to use")
+    p.add_argument("--max-chunk", type=int, default=1 << 22, help="upper bound on rows per block")
+    p.add_argument("--skip-missing", action="store_true", help="skip datasets without graph files")
+    p.add_argument("--overwrite", action="store_true", help="discard earlier results in OUT_DIR/<name>/")
+    p.add_argument("--progress-every", type=float, default=30, help="seconds between progress updates")
+    args = p.parse_args()
+    try:
+        args.rows = {k: int(v) for k, v in (r.split("=", 1) for r in args.rows)}
+    except ValueError:
+        p.error("--rows takes NAME=N, e.g. --rows bigann=10000000")
+    for folder in args.dataset:
+        run_dataset(folder, args)
+
+
+if __name__ == "__main__":
+    main()
