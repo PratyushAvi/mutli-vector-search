@@ -4,3 +4,6 @@ __pycache__/
 .ipynb_checkpoints/
 slurm_out/
 results/
+
+# Gemini API key for src/llm_rank.py
+gemini_api_key.txt
