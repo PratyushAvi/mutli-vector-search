@@ -14,8 +14,8 @@ estimator="plugin" is the PR of the k points themselves, so it is at most rank(Z
 the i = j terms (the U-statistic of effdim.participation_ratio, identical for "mean"), which estimates
 the PR of the local distribution instead; it is not capped but is noisy when k << d.
 
-Steps: `computed_out_degrees` (sources and out-degrees from an adjacency list in vibe.read_graph format,
-restricted to the computed-sources file), `knn` (one pass over memory-mapped vectors in row blocks,
+Steps: `computed_out_degrees` (sources and out-degrees from an adjacency list whose line i is the
+out-neighbourhood of the point on line i of a separate computed file), `knn` (one pass over memory-mapped vectors in row blocks,
 running top-k for all sources on a torch device), `local_pr` (all k and both centrings from one gather
 of the K = max(k) nearest neighbours per source).
 
@@ -39,33 +39,38 @@ def resolve_device(device=None):
 
 ### Graph ###
 
-def computed_path_for(adj_path):
-    """The computed-sources file that goes with adj-list-<stem>.txt (vibe.graph_paths naming), or None."""
-    adj_path = Path(adj_path)
-    if not adj_path.name.startswith("adj-list-"):
-        return None
-    return adj_path.with_name(adj_path.name.removeprefix("adj-list-").removesuffix(".txt") + "-computed.txt")
+def parse_neighbours(line):
+    """Neighbour ids on one adjacency-list line. Accepts "[a, b, ...]", "[(a, u), (b, u), ...]" (the first
+    of each pair is the neighbour, as in vibe.py) and bare "a b ..." / "a, b, ..."; anything before the
+    first "[" is ignored."""
+    body = line.strip()
+    if "[" in body:
+        body = body[body.index("[") + 1 : body.rindex("]")]
+    if "(" in body:
+        pairs = np.array(body.replace("(", " ").replace(")", " ").replace(",", " ").split(), dtype=np.int64)
+        return pairs[0::2]
+    return np.array(body.replace(",", " ").split(), dtype=np.int64)
 
 
-def computed_out_degrees(adj_path, computed_path="auto"):
-    """(sources, out-degrees), sources sorted, for every source with a computed out-neighbourhood.
+def computed_out_degrees(adj_path, computed_path):
+    """(sources, out-degrees), sources sorted, for every point with a computed out-neighbourhood.
 
-    Reads the adjacency list with vibe.read_graph. If a computed-sources file exists ("auto": the one named
-    like the adjacency list, see computed_path_for; None: don't use one), only sources listed in it are
-    kept: a run interrupted between writing a batch's adjacency lines and its computed list leaves sources
-    in the first but not the second."""
-    from vibe import read_graph
-    hoods = read_graph(adj_path)
-    if computed_path == "auto":
-        computed_path = computed_path_for(adj_path)
-    if computed_path is not None and Path(computed_path).exists():
-        done = set(map(int, Path(computed_path).read_text().split()))
-        dropped = len(hoods) - sum(s in done for s in hoods)
-        if dropped:
-            print(f"{adj_path}: {dropped:,} sources are in the adjacency list but not in {computed_path}; dropped")
-        hoods = {s: h for s, h in hoods.items() if s in done}
-    sources = np.array(sorted(hoods), dtype=np.int64)
-    out_deg = np.array([len(hoods[s]) for s in sources], dtype=np.int64)
+    Line i of `adj_path` is the out-neighbourhood of point int(line i of `computed_path`); the two files
+    must have the same number of (non-blank) lines. A point listed twice (e.g. a resumed run) keeps its
+    last line, with a warning."""
+    with open(computed_path) as f:
+        ids = [int(s) for s in (l.strip() for l in f) if s]
+    with open(adj_path) as f:
+        degs = [len(parse_neighbours(l)) for l in f if l.strip()]
+    if len(ids) != len(degs):
+        raise ValueError(f"{computed_path} has {len(ids):,} lines but {adj_path} has {len(degs):,}; "
+                         "line i of one must match line i of the other")
+    deg_of = dict(zip(ids, degs))                         # later lines win
+    if len(deg_of) < len(ids):
+        print(f"warning: {len(ids) - len(deg_of):,} points appear more than once in {computed_path}; "
+              "kept the last line of each")
+    sources = np.array(sorted(deg_of), dtype=np.int64)
+    out_deg = np.array([deg_of[s] for s in sources], dtype=np.int64)
     return sources, out_deg
 
 
@@ -184,7 +189,16 @@ def k_grid(base, d, d_relative=(0.5, 1, 2), n=None):
 ### Sanity checks ###
 
 def _check():
+    import tempfile
     from effdim import participation_ratio
+    with tempfile.TemporaryDirectory() as tmp:
+        adj, comp = Path(tmp) / "adj-list-x.txt", Path(tmp) / "x-computed.txt"
+        adj.write_text("[3, 4, 5]\n[(1, 9), (2, 0)]\n7 8 9 10\n[]\n[1]\n")
+        comp.write_text("12\n2\n40\n5\n2\n")              # point 2 twice: its last line ([1]) wins
+        s, deg = computed_out_degrees(adj, comp)
+        assert s.tolist() == [2, 5, 12, 40] and deg.tolist() == [1, 0, 3, 4], (s, deg)
+    print("computed_out_degrees: line-aligned files read correctly")
+
     rng = np.random.default_rng(0)
     n, d = 3000, 24
     V = (rng.standard_normal((n, d)) * np.linspace(3, 0.2, d)).astype(np.float32)
