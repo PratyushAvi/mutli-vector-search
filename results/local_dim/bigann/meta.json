@@ -1,0 +1,32 @@
+{
+  "dataset": "/scratch/pa2439/ANN-Search/datasets/bigann",
+  "adj": "/scratch/pa2439/ANN-Search/navigable_graph_results/new_results/adj-list-bigann.txt",
+  "computed": "/scratch/pa2439/ANN-Search/navigable_graph_results/new_results/bigann-computed.txt",
+  "n": 1000000000,
+  "d": 128,
+  "dtype": "uint8",
+  "rows": 1000000000,
+  "ks": [
+    16,
+    32,
+    64,
+    128,
+    256,
+    512,
+    1024,
+    2048
+  ],
+  "K": 2048,
+  "centres": [
+    "mean",
+    "v"
+  ],
+  "estimator": "plugin",
+  "pr dtype": "float64",
+  "sources": 10000,
+  "sources sha1": "da83168dfd5692f83a0aa16fc55ec27572b940dd",
+  "max sources": null,
+  "seed": 0,
+  "group": 10000,
+  "groups": 1
+}

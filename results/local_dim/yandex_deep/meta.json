@@ -1,0 +1,35 @@
+{
+  "dataset": "/scratch/pa2439/ANN-Search/datasets/yandex_deep",
+  "adj": "/scratch/pa2439/ANN-Search/navigable_graph_results/new_results/adj-list-yandex_deep.txt",
+  "computed": "/scratch/pa2439/ANN-Search/navigable_graph_results/new_results/yandex_deep-computed.txt",
+  "n": 1000000000,
+  "d": 96,
+  "dtype": "float32",
+  "rows": 1000000000,
+  "ks": [
+    16,
+    32,
+    48,
+    64,
+    96,
+    128,
+    192,
+    256,
+    512,
+    1024,
+    2048
+  ],
+  "K": 2048,
+  "centres": [
+    "mean",
+    "v"
+  ],
+  "estimator": "plugin",
+  "pr dtype": "float64",
+  "sources": 10000,
+  "sources sha1": "57d53defe0544674893fdb6299e13cd5823fa4aa",
+  "max sources": null,
+  "seed": 0,
+  "group": 10000,
+  "groups": 1
+}

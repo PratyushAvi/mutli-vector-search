@@ -1,0 +1,32 @@
+{
+  "dataset": "/scratch/pa2439/ANN-Search/datasets/facebook_sim_searchnet++",
+  "adj": "/scratch/pa2439/ANN-Search/navigable_graph_results/new_results/adj-list-facebook_sim_searchnet++.txt",
+  "computed": "/scratch/pa2439/ANN-Search/navigable_graph_results/new_results/facebook_sim_searchnet++-computed.txt",
+  "n": 1000000000,
+  "d": 256,
+  "dtype": "uint8",
+  "rows": 1000000000,
+  "ks": [
+    16,
+    32,
+    64,
+    128,
+    256,
+    512,
+    1024,
+    2048
+  ],
+  "K": 2048,
+  "centres": [
+    "mean",
+    "v"
+  ],
+  "estimator": "plugin",
+  "pr dtype": "float64",
+  "sources": 10000,
+  "sources sha1": "d9f16a6955ef85bf029ffe38c359b12e8b67ae15",
+  "max sources": null,
+  "seed": 0,
+  "group": 10000,
+  "groups": 1
+}
