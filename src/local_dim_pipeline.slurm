@@ -21,9 +21,9 @@
 #
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
-#SBATCH --cpus-per-task=8
+#SBATCH --cpus-per-task=16
 #SBATCH --time=1-00:00:00
-#SBATCH --mem=64GB
+#SBATCH --mem=128GB
 #SBATCH --job-name=local-dim
 #SBATCH --mail-type=ALL
 #SBATCH --mail-user=pa2439@nyu.edu
@@ -33,7 +33,7 @@
 
 REPO="$SCRATCH/multi-vector-search"                  # repository root on the cluster
 DATASETS_DIR="$SCRATCH/ANN-Search/datasets"          # dataset folders (vectors.npy)
-GRAPH_DIR="$SCRATCH/ANN-Search/graphs"               # TODO: where adj-list-<name>.txt and <name>-computed.txt are
+GRAPH_DIR="$SCRATCH/ANN-Search/navigable_graph_results/new_results"               # TODO: where adj-list-<name>.txt and <name>-computed.txt are
 DEFAULT_DATASETS=(bigann spacev1b "facebook_sim_searchnet++" yandex_deep)
 
 # Dataset names up to "--", local_dim_pipeline.py arguments after it.
