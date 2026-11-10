@@ -122,6 +122,44 @@ def knn(V, queries, k, rows=None, device=None, chunk=1 << 17, query_batch=2048, 
     return best_i.cpu().numpy(), best_d.cpu().numpy()
 
 
+### Gathering rows ###
+
+def gather_rows(V, ids, chunk=1 << 20, progress=True):
+    """V[ids] for sorted unique row ids, read in one sequential pass over blocks of `chunk` rows (blocks with
+    no wanted row are skipped). On a large memory-mapped file this is far faster than V[ids]: ids scattered
+    over the file make fancy indexing one random read per row, which on network storage is slow."""
+    ids = np.asarray(ids, dtype=np.int64)
+    assert np.all(np.diff(ids) > 0), "ids must be sorted and unique"
+    out = np.empty((len(ids), V.shape[1]), dtype=V.dtype)
+    blk = ids // chunk
+    bounds = np.r_[np.flatnonzero(np.r_[True, blk[1:] != blk[:-1]]), len(ids)]   # runs of ids in one block
+    runs = zip(bounds[:-1], bounds[1:])
+    if progress:
+        from tqdm.auto import tqdm
+        runs = tqdm(runs, total=len(bounds) - 1, unit="block", desc=f"gather {len(ids):,} rows")
+    for a, b in runs:
+        start = int(blk[a]) * chunk
+        stop = int(ids[b - 1]) + 1                       # read only up to the last wanted row of the block
+        X = np.asarray(V[start:stop])
+        out[a:b] = X[ids[a:b] - start]
+    return out
+
+
+class Rows:
+    """A few rows of a large array held in memory: Rows(ids, X)[j] is the row with original id j, for any
+    array of ids drawn from `ids` (sorted). Stands in for V in local_pr."""
+
+    def __init__(self, ids, X):
+        self.ids, self.X = np.asarray(ids, dtype=np.int64), X
+        self.shape = (int(self.ids[-1]) + 1 if len(self.ids) else 0, X.shape[1])
+
+    def __getitem__(self, j):
+        j = np.asarray(j, dtype=np.int64)
+        pos = np.searchsorted(self.ids, j)
+        assert np.all(pos < len(self.ids)) and np.array_equal(self.ids[pos], j), "row not gathered"
+        return self.X[pos]
+
+
 ### Local PR ###
 
 def pr_rows(Z, estimator="plugin"):
@@ -211,8 +249,13 @@ def _check():
     assert not np.isin(queries[:, None], ids).any(axis=1).any(), "a query is its own neighbour"
     print("knn: matches brute force")
 
+    want = np.unique(np.r_[queries, ids.ravel()])
+    W = Rows(want, gather_rows(V, want, chunk=256, progress=False))
+    assert np.array_equal(W[ids[:5].ravel()], V[ids[:5].ravel()]), "gather_rows / Rows disagree with V"
+    print("gather_rows: matches V")
+
     ks = [10, 20, 40]                                   # k < d, k ~ d, k > d: both Gram branches
-    pr = local_pr(V, queries, ids, ks, estimator="plugin", device="cpu", batch=7, progress=False)
+    pr = local_pr(W, queries, ids, ks, estimator="plugin", device="cpu", batch=7, progress=False)
     pu = local_pr(V, queries, ids, ks, estimator="u", device="cpu", batch=7, progress=False)
     for i in range(0, len(queries), 13):
         for k in ks:
