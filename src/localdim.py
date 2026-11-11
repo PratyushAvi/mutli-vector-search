@@ -449,6 +449,40 @@ def local_robust_prune(Y, dv, ks, alpha=1.0):
     return out
 
 
+def read_local_prune(path):
+    """(sources, degrees, uncovered counts flat) from a local_prune_k<k>.txt file ("source [(nbr, unc), ...]")."""
+    sources, degree, unc = [], [], []
+    with open(path) as fh:
+        for line in fh:
+            if not line.strip():
+                continue
+            body = line[line.index("[") + 1 : line.rindex("]")]
+            pairs = np.array(body.replace("(", " ").replace(")", " ").replace(",", " ").split(), dtype=np.int64)
+            sources.append(int(line.split(maxsplit=1)[0]))
+            degree.append(len(pairs) // 2)
+            unc.append(pairs[1::2])
+    flat = np.concatenate(unc) if unc else np.empty(0, dtype=np.int64)
+    return np.array(sources, dtype=np.int64), np.array(degree, dtype=np.int64), flat
+
+
+def coverage_summary(degree, uncovered, k, quantiles=(0.5, 0.9)):
+    """Local coverage curve of one k over all sources: for j = 1 .. max degree, the mean (and quantiles) of the
+    fraction of N_k(v) still uncovered after v's first j local-prune edges (0 once v is done), and the share of
+    sources needing more than j edges. degree: (q,); uncovered: counts after each edge, all sources concatenated.
+    Returns {column: array}."""
+    degree = np.asarray(degree, dtype=np.int64)
+    m = int(degree.max()) if len(degree) else 0
+    A = np.zeros((len(degree), m), dtype=np.float32)
+    starts = np.cumsum(degree) - degree
+    pos = np.arange(len(uncovered)) - np.repeat(starts, degree)         # edge index within its source
+    A[np.repeat(np.arange(len(degree)), degree), pos] = np.asarray(uncovered) / k
+    out = {"k": np.full(m, k), "edges": np.arange(1, m + 1), "mean uncovered": A.mean(0)}
+    for qv in quantiles:
+        out[f"p{round(qv * 100)} uncovered"] = np.quantile(A, qv, axis=0)
+    out["sources not done"] = (degree[:, None] > np.arange(1, m + 1)[None]).mean(0)
+    return out
+
+
 def k_grid(base, d, d_relative=(0.5, 1, 2), n=None):
     """Sorted union of `base` and round(f * d) for f in d_relative, keeping k <= n - 1 when n is given."""
     ks = set(int(k) for k in base) | {max(2, round(f * d)) for f in d_relative}

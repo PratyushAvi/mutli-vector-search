@@ -31,6 +31,8 @@ With --local-prune, also (the k-NN pass then keeps neighbour ids; groups done wi
   local_prune_k<k>.txt robust prune from v over N_k(v) alone (alpha --prune-alpha, as utils.py's prune), one line
                        per source: "source [(neighbour id, points of N_k(v) still uncovered after it), ...]";
                        divide by k for the uncovered fraction
+  local_prune_coverage.csv  per k and j = 1 .. max edges: mean / p50 / p90 fraction of N_k(v) still uncovered
+                       after j local-prune edges, share of sources needing more than j (local_prune_summary.py)
   local_pr.csv columns out_in_knn_k<k> (fraction of v's out-neighbourhood inside N_k(v)) and lp_degree_k<k>
                        (edges the local prune needs to cover N_k(v)); part-<g>-prune.npz per group
 
@@ -57,6 +59,7 @@ from localdim import log
 from paths import RESULTS_DIR
 
 K_BASE = [16, 32, 64, 128, 256, 512, 1024, 2048]
+COVERAGE_CSV = "local_prune_coverage.csv"   # local coverage curves, all k (small; local_prune_summary.py rebuilds it)
 
 
 def gib(b):
@@ -260,13 +263,16 @@ def compute(name, f, rows, sources, out_deg, info, args, out_nbrs=None):
     cols = {key: np.concatenate([z[key] for z in parts]) for key in parts[0].files}
     if args.local_prune:
         lps = [np.load(out / f"part-{g}-prune.npz") for g in range(len(groups))]
+        curves = []
         for k in ks:
             cols[f"out_in_knn_k{k}"] = np.concatenate([z[f"out_in_knn_k{k}"] for z in lps])
             cols[f"lp_degree_k{k}"] = np.concatenate([z[f"lp_degree_k{k}"] for z in lps])
+            unc = np.concatenate([z[f"lp_uncovered_k{k}"] for z in lps])
             write_local_prune(out / f"local_prune_k{k}.txt", sources, cols[f"lp_degree_k{k}"],
-                              np.concatenate([z[f"lp_nbrs_k{k}"] for z in lps]),
-                              np.concatenate([z[f"lp_uncovered_k{k}"] for z in lps]))
-        log(f"{name}: wrote {out}/local_prune_k<k>.txt for k = {ks}")
+                              np.concatenate([z[f"lp_nbrs_k{k}"] for z in lps]), unc)
+            curves.append(pd.DataFrame(localdim.coverage_summary(cols[f"lp_degree_k{k}"], unc, k)))
+        pd.concat(curves).to_csv(out / COVERAGE_CSV, index=False)
+        log(f"{name}: wrote {out}/local_prune_k<k>.txt for k = {ks} and their coverage curves, {out / COVERAGE_CSV}")
     df = pd.DataFrame({"source": sources, "out_degree": out_deg} | cols)
     df.to_csv(out / "local_pr.csv", index=False)
     log(f"{name}: wrote {out / 'local_pr.csv'} ({localdim._hms(time.time() - t0)})")
