@@ -273,7 +273,8 @@ def iter_blocks(f, stop, chunk, start=0):
 
 ### Nearest neighbours, keeping their vectors ###
 
-def knn_vectors(f, rows, q_ids, Q_raw, k, device, chunk, query_batch, progress=True, mininterval=0.1):
+def knn_vectors(f, rows, q_ids, Q_raw, k, device, chunk, query_batch, progress=True, mininterval=0.1,
+                merge_batch=None):
     """The k nearest neighbours (squared Euclidean) of each query among rows 0 .. rows - 1 of NpyFile f, a
     query itself excluded: their vectors (in the file's dtype) and squared distances, nearest first.
 
@@ -281,7 +282,9 @@ def knn_vectors(f, rows, q_ids, Q_raw, k, device, chunk, query_batch, progress=T
     file in blocks of `chunk` rows. For every query the running top k (distances and vectors) stays on
     `device`, about k * (4 + d * itemsize) bytes per query. Per block and query batch, only queries with a
     point closer than their current k-th neighbour are merged, so late blocks cost little beyond the
-    distance computation. Distances are float32. Returns torch tensors (vectors (q, k, d), dists (q, k))."""
+    distance computation. Distances are float32. merge_batch caps how many queries are merged at once (merging
+    holds about 2 * k * (d * itemsize + 12) bytes per query; None: the whole query batch).
+    Returns torch tensors (vectors (q, k, d), dists (q, k))."""
     import torch
     nq, d = Q_raw.shape
     assert np.all(np.diff(q_ids) > 0), "queries must be sorted and unique"
@@ -310,18 +313,19 @@ def knn_vectors(f, rows, q_ids, Q_raw, k, device, chunk, query_batch, progress=T
             D[r, own[r] - s] = float("inf")                 # a query is not its own neighbour
             d_blk, i_blk = D.topk(kk, dim=1, largest=False)
             del D
-            cand = torch.nonzero(d_blk[:, 0] < best_d[qs:qe, -1]).squeeze(1)
-            if len(cand) == 0:
-                continue
-            rws = qs + cand
-            d_all = torch.cat([best_d[rws], d_blk[cand]], 1)
-            d_new, pos = d_all.topk(k, dim=1, largest=False)  # sorted, nearest first
-            from_blk = pos >= k
-            v = best_v[rws[:, None], torch.where(from_blk, 0, pos)]    # kept entries (others overwritten next)
-            rr, cc = torch.nonzero(from_blk, as_tuple=True)
-            v[rr, cc] = Xr[i_blk[cand][rr, pos[rr, cc] - k]]
-            best_d[rws], best_v[rws] = d_new, v
-            del d_all, d_new, pos, from_blk, v
+            cand_all = torch.nonzero(d_blk[:, 0] < best_d[qs:qe, -1]).squeeze(1)
+            # Merged merge_batch queries at a time: each holds about 2 x k x d vectors while merging.
+            for ms in range(0, len(cand_all), merge_batch or len(cand_all)):
+                cand = cand_all[ms : ms + (merge_batch or len(cand_all))]
+                rws = qs + cand
+                d_all = torch.cat([best_d[rws], d_blk[cand]], 1)
+                d_new, pos = d_all.topk(k, dim=1, largest=False)  # sorted, nearest first
+                from_blk = pos >= k
+                v = best_v[rws[:, None], torch.where(from_blk, 0, pos)]    # kept entries (others overwritten next)
+                rr, cc = torch.nonzero(from_blk, as_tuple=True)
+                v[rr, cc] = Xr[i_blk[cand][rr, pos[rr, cc] - k]]
+                best_d[rws], best_v[rws] = d_new, v
+                del d_all, d_new, pos, from_blk, v, rr, cc
         del Xr, X, x_sq
     return best_v, best_d
 

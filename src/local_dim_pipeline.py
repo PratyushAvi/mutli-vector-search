@@ -66,11 +66,14 @@ def plan(nq, K, d, itemsize, rows, device, host_frac, gpu_frac, max_chunk, pr_it
     if group < 1:
         raise MemoryError(f"one source needs {gib(per_src)} of device memory for K={K}; have {gib(dev)}")
     work = dev - group * per_src
+    per_merge = K * (2 * d * itemsize + 4 * 3 + 8 * 4)         # kept + gathered vectors, distances, indices
     qb = min(group, 4096)
     while True:
+        merge_batch = int(max(1, min(qb, (work * 0.25) // per_merge)))
         per_row = d * (itemsize + 4) + 4 + qb * 4 * 2           # raw + float block, norms, distances + topk
-        merge = qb * (K * (d * itemsize + 4 * 3 + 8 * 3) + min(K, max_chunk) * 12)
-        chunk = int(min((work - merge) // per_row, buf_budget // (2 * d * itemsize), max_chunk, rows))
+        fixed = merge_batch * per_merge + qb * K * 12 * 2        # merge + the block's top K (values, indices)
+        # half of the rest for the block and its distances; the other half is headroom for topk's workspace
+        chunk = int(min((work - fixed) * 0.5 // per_row, buf_budget // (2 * d * itemsize), max_chunk, rows))
         if chunk >= 8192 or qb == 1:
             break
         qb //= 2
@@ -79,7 +82,7 @@ def plan(nq, K, d, itemsize, rows, device, host_frac, gpu_frac, max_chunk, pr_it
     pr_per_src = 3 * K * d * pr_itemsize + 2 * min(K, d) ** 2 * pr_itemsize
     pr_batch = int(max(1, min(group, (dev - group * per_src) // pr_per_src)))
     return {"host budget": host, "device budget": dev, "group": group, "query batch": qb, "chunk": chunk,
-            "pr batch": pr_batch, "per source": per_src}
+            "merge batch": merge_batch, "pr batch": pr_batch, "per source": per_src}
 
 
 def fingerprint(a):
@@ -138,7 +141,7 @@ def compute(name, f, rows, sources, out_deg, info, args):
           f"  budgets: host {gib(p['host budget'])}, device {gib(p['device budget'])}; "
           f"{gib(p['per source'])} per source\n"
           f"  {len(groups)} pass(es) of up to {p['group']:,} sources; chunk {p['chunk']:,} rows "
-          f"({gib(p['chunk'] * d * f.dtype.itemsize)}), query batch {p['query batch']:,}, PR batch {p['pr batch']:,}")
+          f"({gib(p['chunk'] * d * f.dtype.itemsize)}), query batch {p['query batch']:,}, merge batch {p['merge batch']:,}, PR batch {p['pr batch']:,}")
 
     meta = info | {"name": name, "n": n, "d": d,
             "dtype": str(f.dtype), "rows": rows, "ks": ks, "K": K, "centres": list(localdim.CENTRES),
@@ -179,7 +182,7 @@ def compute(name, f, rows, sources, out_deg, info, args):
         log(f"{name}: group {g + 1}/{len(groups)}: reading {b - a:,} source vectors")
         Q_raw = f.rows(sources[a:b])
         best_v, best_d = localdim.knn_vectors(f, rows, sources[a:b], Q_raw, K, device, p["chunk"], p["query batch"],
-                                              mininterval=args.progress_every)
+                                              mininterval=args.progress_every, merge_batch=p["merge batch"])
         nbr_d[a:b] = best_d.cpu().numpy()
         nbr_d.flush()
         if args.save_vectors:
