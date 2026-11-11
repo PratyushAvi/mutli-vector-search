@@ -1,0 +1,35 @@
+{
+  "dataset": "/scratch/pa2439/ANN-Search/datasets/spacev1b",
+  "adj": "/scratch/pa2439/ANN-Search/navigable_graph_results/new_results/adj-list-spacev1b.txt",
+  "computed": "/scratch/pa2439/ANN-Search/navigable_graph_results/new_results/spacev1b-computed.txt",
+  "n": 1402020720,
+  "d": 100,
+  "dtype": "int8",
+  "rows": 1402020720,
+  "ks": [
+    16,
+    32,
+    50,
+    64,
+    100,
+    128,
+    200,
+    256,
+    512,
+    1024,
+    2048
+  ],
+  "K": 2048,
+  "centres": [
+    "mean",
+    "v"
+  ],
+  "estimator": "plugin",
+  "pr dtype": "float64",
+  "sources": 10000,
+  "sources sha1": "bc571d40b549a47f0ac62169d5ed476d6d844a66",
+  "max sources": null,
+  "seed": 0,
+  "group": 10000,
+  "groups": 1
+}
