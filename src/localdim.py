@@ -233,6 +233,28 @@ class NpyFile:
         return np.ascontiguousarray(self._mmap[np.asarray(ids, dtype=np.int64)])
 
 
+class ArrayFile:
+    """An in-memory (n, d) array behind the NpyFile interface (shape, dtype, read, rows), e.g. VIBE `train`
+    points already loaded and normalised, so knn_vectors can run on them unchanged."""
+
+    def __init__(self, X):
+        self.X = np.ascontiguousarray(X)
+        if self.X.ndim != 2:
+            raise ValueError(f"expected an (n, d) array, got shape {self.X.shape}")
+        self.shape, self.dtype = self.X.shape, self.X.dtype
+
+    def __len__(self):
+        return self.shape[0]
+
+    def read(self, start, stop, out):
+        view = out[: stop - start]
+        view[...] = self.X[start:stop]
+        return view
+
+    def rows(self, ids):
+        return self.X[np.asarray(ids, dtype=np.int64)]
+
+
 def iter_blocks(f, stop, chunk, start=0):
     """(start, stop, rows) for consecutive blocks of `chunk` rows of NpyFile f, from `start` to `stop`.
     Double buffered: block i + 1 is read in a thread while the caller uses block i, and the caller must be

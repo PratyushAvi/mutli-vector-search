@@ -18,10 +18,11 @@ Sizes follow the memory available (printed at the start of each dataset):
       rest. More sources than one group holds means one pass over the file per group.
 
 Writes OUT_DIR/<name>/ (resumes: groups with a part file are skipped):
-  meta.json            dataset, graph files, n, d, dtype, rows, ks, estimator, sources, groups, sizes
+  meta.json            source ("npy"), dataset, graph files, n, d, dtype, rows, ks, estimator, sources, groups, sizes
   sources.npy          source row ids (sorted); out_degree.npy: their out-degrees
   source_vectors.npy   (q, d) the sources' vectors, in the file's dtype
   nbr_vectors.npy      (q, K, d) the K nearest neighbours' vectors, nearest first, in the file's dtype
+                       (with source_vectors.npy, not written with --no-save-vectors)
   nbr_sq_dists.npy     (q, K) float32 squared distances to them
   part-<g>.npz         local PR of group g; local_pr.csv: everything, one row per source (when all are done)
 
@@ -29,6 +30,8 @@ Usage:
   python src/local_dim_pipeline.py --graph-dir $SCRATCH/ANN-Search/graphs \\
       --dataset $SCRATCH/ANN-Search/datasets/bigann --dataset $SCRATCH/ANN-Search/datasets/spacev1b
   python src/local_dim_pipeline.py --graph-dir ... --dataset .../bigann --rows bigann=10000000 --max-sources 5000
+
+local_dim_vibe.py does the same for VIBE datasets (robust-prune graphs from vibe_pipeline.py), through compute().
 """
 
 import argparse
@@ -94,17 +97,26 @@ def run_dataset(folder, args):
             log(msg + "; skipped")
             return
         raise FileNotFoundError(msg)
-    t0 = time.time()
     f = localdim.NpyFile(folder / "vectors.npy")
-    n, d = f.shape
+    n = f.shape[0]
     rows = args.rows.get(name, n)
-    out = args.out_dir / (name + (f"-n{rows}" if rows != n else ""))
-    out.mkdir(parents=True, exist_ok=True)
-
     log(f"{name}: reading graph files {adj} and {computed}")
     sources, out_deg = localdim.computed_out_degrees(adj, computed)
+    info = {"source": "npy", "dataset": str(folder), "adj": str(adj), "computed": str(computed)}
+    compute(name + (f"-n{rows}" if rows != n else ""), f, rows, sources, out_deg, info, args)
+
+
+def compute(name, f, rows, sources, out_deg, info, args):
+    """Steps 2-3 for one point set and its graph, written to OUT_DIR/<name>/. f: NpyFile or ArrayFile; rows: the
+    graph was built on f's first `rows` points; sources (sorted) and out_deg: the points with a computed
+    out-neighbourhood; info: extra meta.json entries (e.g. where the data and graph came from). Shared with
+    local_dim_vibe.py."""
+    t0 = time.time()
+    n, d = f.shape
+    out = args.out_dir / name
+    out.mkdir(parents=True, exist_ok=True)
     log(f"{name}: {len(sources):,} sources with a computed out-neighbourhood")
-    assert len(sources), f"{name}: no sources in {computed}"
+    assert len(sources), f"{name}: no sources with a computed out-neighbourhood"
     assert sources[-1] < rows, f"{name}: source {sources[-1]} is outside the first {rows:,} rows"
     if args.max_sources is not None and args.max_sources < len(sources):
         keep = np.sort(np.random.default_rng(args.seed).choice(len(sources), args.max_sources, replace=False))
@@ -128,7 +140,7 @@ def run_dataset(folder, args):
           f"  {len(groups)} pass(es) of up to {p['group']:,} sources; chunk {p['chunk']:,} rows "
           f"({gib(p['chunk'] * d * f.dtype.itemsize)}), query batch {p['query batch']:,}, PR batch {p['pr batch']:,}")
 
-    meta = {"dataset": str(folder), "adj": str(adj), "computed": str(computed), "n": n, "d": d,
+    meta = info | {"name": name, "n": n, "d": d,
             "dtype": str(f.dtype), "rows": rows, "ks": ks, "K": K, "centres": list(localdim.CENTRES),
             "estimator": args.estimator, "pr dtype": args.pr_dtype, "sources": q, "sources sha1": fingerprint(sources),
             "max sources": args.max_sources, "seed": args.seed, "group": p["group"], "groups": len(groups)}
@@ -152,8 +164,10 @@ def run_dataset(folder, args):
                 return m
         return open_memmap(path, mode="w+", shape=shape, dtype=dtype)
 
-    src_v = memmap("source_vectors.npy", (q, d), f.dtype)
-    nbr_v = memmap("nbr_vectors.npy", (q, K, d), f.dtype)
+    if args.save_vectors:
+        log(f"{name}: neighbour vectors take {gib(q * K * d * f.dtype.itemsize)} on disk")
+        src_v = memmap("source_vectors.npy", (q, d), f.dtype)
+        nbr_v = memmap("nbr_vectors.npy", (q, K, d), f.dtype)
     nbr_d = memmap("nbr_sq_dists.npy", (q, K), np.float32)
 
     import torch
@@ -164,16 +178,18 @@ def run_dataset(folder, args):
             continue
         log(f"{name}: group {g + 1}/{len(groups)}: reading {b - a:,} source vectors")
         Q_raw = f.rows(sources[a:b])
-        src_v[a:b] = Q_raw
         best_v, best_d = localdim.knn_vectors(f, rows, sources[a:b], Q_raw, K, device, p["chunk"], p["query batch"],
                                               mininterval=args.progress_every)
-        log(f"{name}: group {g + 1}/{len(groups)}: writing neighbour vectors to {out / 'nbr_vectors.npy'}")
-        step = max(1, (1 << 30) // max(1, K * d * f.dtype.itemsize))   # copy back ~1 GiB at a time
-        for s in range(0, b - a, step):
-            e = min(s + step, b - a)
-            nbr_v[a + s : a + e] = best_v[s:e].cpu().numpy()
-            nbr_d[a + s : a + e] = best_d[s:e].cpu().numpy()
-        nbr_v.flush(), nbr_d.flush(), src_v.flush()
+        nbr_d[a:b] = best_d.cpu().numpy()
+        nbr_d.flush()
+        if args.save_vectors:
+            log(f"{name}: group {g + 1}/{len(groups)}: writing neighbour vectors to {out / 'nbr_vectors.npy'}")
+            src_v[a:b] = Q_raw
+            step = max(1, (1 << 30) // max(1, K * d * f.dtype.itemsize))   # copy back ~1 GiB at a time
+            for s in range(0, b - a, step):
+                e = min(s + step, b - a)
+                nbr_v[a + s : a + e] = best_v[s:e].cpu().numpy()
+            nbr_v.flush(), src_v.flush()
 
         log(f"{name}: group {g + 1}/{len(groups)}: local PR for {len(ks)} k values x {len(localdim.CENTRES)} centrings")
         Qt = torch.as_tensor(Q_raw, device=device)
@@ -196,16 +212,10 @@ def run_dataset(folder, args):
     log(f"{name}: wrote {out / 'local_pr.csv'} ({localdim._hms(time.time() - t0)})")
 
 
-def main():
-    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--dataset", action="append", required=True, type=Path,
-                   help="dataset folder holding vectors.npy (repeat for several)")
-    p.add_argument("--graph-dir", required=True, type=Path,
-                   help="folder with adj-list-<name>.txt and <name>-computed.txt for each dataset")
+def add_compute_args(p):
+    """Arguments shared with local_dim_vibe.py: output, sources, k grid, estimator, device and memory."""
     p.add_argument("--out-dir", type=Path, default=RESULTS_DIR / "local_dim",
                    help="results go to OUT_DIR/<name>/ (default: results/local_dim, as in the notebook)")
-    p.add_argument("--rows", action="append", default=[], metavar="NAME=N",
-                   help="the graph of dataset NAME was built on its first N points (repeatable)")
     p.add_argument("--max-sources", type=int, help="a seeded random subset of this many sources")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--k", type=int, nargs="+", default=K_BASE, help=f"k grid (default {K_BASE})")
@@ -217,9 +227,22 @@ def main():
     p.add_argument("--host-mem-fraction", type=float, default=0.5, help="share of available RAM to use")
     p.add_argument("--gpu-mem-fraction", type=float, default=0.85, help="share of free GPU memory to use")
     p.add_argument("--max-chunk", type=int, default=1 << 22, help="upper bound on rows per block")
-    p.add_argument("--skip-missing", action="store_true", help="skip datasets without graph files")
+    p.add_argument("--skip-missing", action="store_true", help="skip datasets without data or graph files")
+    p.add_argument("--no-save-vectors", dest="save_vectors", action="store_false",
+                   help="do not write source_vectors.npy / nbr_vectors.npy (q x K x d; can be terabytes)")
     p.add_argument("--overwrite", action="store_true", help="discard earlier results in OUT_DIR/<name>/")
     p.add_argument("--progress-every", type=float, default=30, help="seconds between progress updates")
+
+
+def main():
+    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--dataset", action="append", required=True, type=Path,
+                   help="dataset folder holding vectors.npy (repeat for several)")
+    p.add_argument("--graph-dir", required=True, type=Path,
+                   help="folder with adj-list-<name>.txt and <name>-computed.txt for each dataset")
+    p.add_argument("--rows", action="append", default=[], metavar="NAME=N",
+                   help="the graph of dataset NAME was built on its first N points (repeatable)")
+    add_compute_args(p)
     args = p.parse_args()
     try:
         args.rows = {k: int(v) for k, v in (r.split("=", 1) for r in args.rows)}
