@@ -1,0 +1,41 @@
+{
+  "source": "vibe",
+  "dataset": "agnews-mxbai-1024-euclidean",
+  "file": "/scratch/pa2439/ANN-Search/datasets/vibe/agnews-mxbai-1024-euclidean.hdf5",
+  "distance": "euclidean",
+  "max points": null,
+  "data seed": 0,
+  "points": "gaussian",
+  "adj": "/scratch/pa2439/multi-vector-search/results/vibe_graphs/adj-list-agnews-mxbai-1024-euclidean-gaussian-alpha1-euclidean.txt",
+  "computed": "/scratch/pa2439/multi-vector-search/results/vibe_graphs/agnews-mxbai-1024-euclidean-gaussian-alpha1-euclidean-computed.txt",
+  "alpha": 1.0,
+  "global pr": 124.83984826289006,
+  "name": "agnews-mxbai-1024-euclidean-gaussian",
+  "n": 769382,
+  "d": 1024,
+  "dtype": "float32",
+  "rows": 769382,
+  "ks": [
+    16,
+    32,
+    64,
+    128,
+    256,
+    512,
+    1024,
+    2048
+  ],
+  "K": 2048,
+  "centres": [
+    "mean",
+    "v"
+  ],
+  "estimator": "plugin",
+  "pr dtype": "float64",
+  "sources": 10000,
+  "sources sha1": "94426457000dc911b89900b1bb8581fcf6c42d61",
+  "max sources": 10000,
+  "seed": 0,
+  "group": 4194,
+  "groups": 3
+}
