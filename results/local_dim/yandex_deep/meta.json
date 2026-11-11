@@ -1,7 +1,9 @@
 {
+  "source": "npy",
   "dataset": "/scratch/pa2439/ANN-Search/datasets/yandex_deep",
   "adj": "/scratch/pa2439/ANN-Search/navigable_graph_results/new_results/adj-list-yandex_deep.txt",
   "computed": "/scratch/pa2439/ANN-Search/navigable_graph_results/new_results/yandex_deep-computed.txt",
+  "name": "yandex_deep",
   "n": 1000000000,
   "d": 96,
   "dtype": "float32",
@@ -31,5 +33,7 @@
   "max sources": null,
   "seed": 0,
   "group": 10000,
-  "groups": 1
+  "groups": 1,
+  "local prune": true,
+  "prune alpha": 1.0
 }

@@ -40,5 +40,7 @@
   "max sources": 10000,
   "seed": 0,
   "group": 10000,
-  "groups": 1
+  "groups": 1,
+  "local prune": true,
+  "prune alpha": 1.0
 }

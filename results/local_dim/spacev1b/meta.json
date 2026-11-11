@@ -1,7 +1,9 @@
 {
+  "source": "npy",
   "dataset": "/scratch/pa2439/ANN-Search/datasets/spacev1b",
   "adj": "/scratch/pa2439/ANN-Search/navigable_graph_results/new_results/adj-list-spacev1b.txt",
   "computed": "/scratch/pa2439/ANN-Search/navigable_graph_results/new_results/spacev1b-computed.txt",
+  "name": "spacev1b",
   "n": 1402020720,
   "d": 100,
   "dtype": "int8",
@@ -31,5 +33,7 @@
   "max sources": null,
   "seed": 0,
   "group": 10000,
-  "groups": 1
+  "groups": 1,
+  "local prune": true,
+  "prune alpha": 1.0
 }

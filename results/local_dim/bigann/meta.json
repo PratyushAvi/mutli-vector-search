@@ -1,7 +1,9 @@
 {
+  "source": "npy",
   "dataset": "/scratch/pa2439/ANN-Search/datasets/bigann",
   "adj": "/scratch/pa2439/ANN-Search/navigable_graph_results/new_results/adj-list-bigann.txt",
   "computed": "/scratch/pa2439/ANN-Search/navigable_graph_results/new_results/bigann-computed.txt",
+  "name": "bigann",
   "n": 1000000000,
   "d": 128,
   "dtype": "uint8",
@@ -28,5 +30,7 @@
   "max sources": null,
   "seed": 0,
   "group": 10000,
-  "groups": 1
+  "groups": 1,
+  "local prune": true,
+  "prune alpha": 1.0
 }

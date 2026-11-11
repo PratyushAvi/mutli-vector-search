@@ -1,7 +1,9 @@
 {
+  "source": "npy",
   "dataset": "/scratch/pa2439/ANN-Search/datasets/facebook_sim_searchnet++",
   "adj": "/scratch/pa2439/ANN-Search/navigable_graph_results/new_results/adj-list-facebook_sim_searchnet++.txt",
   "computed": "/scratch/pa2439/ANN-Search/navigable_graph_results/new_results/facebook_sim_searchnet++-computed.txt",
+  "name": "facebook_sim_searchnet++",
   "n": 1000000000,
   "d": 256,
   "dtype": "uint8",
@@ -28,5 +30,7 @@
   "max sources": null,
   "seed": 0,
   "group": 10000,
-  "groups": 1
+  "groups": 1,
+  "local prune": true,
+  "prune alpha": 1.0
 }
