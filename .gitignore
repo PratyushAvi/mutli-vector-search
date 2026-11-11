@@ -8,6 +8,7 @@ results/*
 !results/local_dim/
 results/local_dim/**/nbr_vectors.npy
 results/local_dim/**/nbr_sq_dists.npy
+results/local_dim/**/nbr_ids.npy
 results/local_dim/**/source_vectors.npy
 results/local_dim/**/part-*.npz
 

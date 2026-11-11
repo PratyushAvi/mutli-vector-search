@@ -21,6 +21,9 @@ Usage:
   python src/local_dim_vibe.py --dataset glove-200-cosine --dataset landmark-nomic-768-normalized \\
       --download-dir $SCRATCH/ANN-Search/datasets/vibe
   python src/local_dim_vibe.py --dataset glove-200-cosine --download-dir ... --max-points 200000 --max-sources 5000
+  python src/local_dim_vibe.py --dataset glove-200-cosine --download-dir ... --max-sources 10000 --local-prune
+
+--local-prune (see local_dim_pipeline.py) adds the out-neighbourhood / kNN overlap and the local robust prune.
 """
 
 import argparse
@@ -41,13 +44,14 @@ def participation_ratio(lam):
 
 
 def graph_sources(adj, computed):
-    """(sorted sources, out-degrees) from a vibe.py adjacency list, for the sources in its computed file."""
+    """(sorted sources, out-degrees, {source: out-neighbour ids}) from a vibe.py adjacency list, for the sources
+    in its computed file."""
     hoods = read_graph(adj)
     done = set(map(int, computed.read_text().split()))
     sources = np.array(sorted(s for s in hoods if s in done), dtype=np.int64)
     if len(sources) < len(hoods):
         log(f"warning: {len(hoods) - len(sources):,} sources in {adj} are not in {computed}; left out")
-    return sources, np.array([len(hoods[s]) for s in sources], dtype=np.int64)
+    return sources, np.array([len(hoods[s]) for s in sources], dtype=np.int64), hoods
 
 
 def run_graph(label, graph_name, X, global_pr, info, args):
@@ -61,13 +65,14 @@ def run_graph(label, graph_name, X, global_pr, info, args):
             return
         raise FileNotFoundError(msg)
     log(f"{graph_name}: reading graph {adj}")
-    sources, out_deg = graph_sources(adj, computed)
+    sources, out_deg, hoods = graph_sources(adj, computed)
     if len(sources) < len(X):
         log(f"{graph_name}: the graph is partial ({len(sources):,} of {len(X):,} sources computed)")
     out_name = graph_name + (f"-alpha{args.alpha:g}".replace(".", "p") if args.alpha != 1 else "")
     info = info | {"points": label, "adj": str(adj), "computed": str(computed), "alpha": args.alpha,
                    "global pr": global_pr}
-    compute(out_name, localdim.ArrayFile(X), len(X), sources, out_deg, info, args)
+    compute(out_name, localdim.ArrayFile(X), len(X), sources, out_deg, info, args,
+            hoods if args.local_prune else None)
 
 
 def run_dataset(dataset, args):

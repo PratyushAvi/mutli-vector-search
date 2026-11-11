@@ -26,6 +26,14 @@ Writes OUT_DIR/<name>/ (resumes: groups with a part file are skipped):
   nbr_sq_dists.npy     (q, K) float32 squared distances to them
   part-<g>.npz         local PR of group g; local_pr.csv: everything, one row per source (when all are done)
 
+With --local-prune, also (the k-NN pass then keeps neighbour ids; groups done without them are run again):
+  nbr_ids.npy          (q, K) int64 ids of the K nearest neighbours, nearest first
+  local_prune_k<k>.txt robust prune from v over N_k(v) alone (alpha --prune-alpha, as utils.py's prune), one line
+                       per source: "source [(neighbour id, points of N_k(v) still uncovered after it), ...]";
+                       divide by k for the uncovered fraction
+  local_pr.csv columns out_in_knn_k<k> (fraction of v's out-neighbourhood inside N_k(v)) and lp_degree_k<k>
+                       (edges the local prune needs to cover N_k(v)); part-<g>-prune.npz per group
+
 Usage:
   python src/local_dim_pipeline.py --graph-dir $SCRATCH/ANN-Search/graphs \\
       --dataset $SCRATCH/ANN-Search/datasets/bigann --dataset $SCRATCH/ANN-Search/datasets/spacev1b
@@ -55,13 +63,15 @@ def gib(b):
     return f"{b / 2**30:.1f} GiB"
 
 
-def plan(nq, K, d, itemsize, rows, device, host_frac, gpu_frac, max_chunk, pr_itemsize):
+def plan(nq, K, d, itemsize, rows, device, host_frac, gpu_frac, max_chunk, pr_itemsize, local_prune=False):
     """Group size, query batch, chunk rows and PR batch from the memory available now."""
     host = localdim.host_available_bytes() * host_frac
     on_gpu = str(device).startswith("cuda")
     dev = localdim.device_free_bytes(device) * gpu_frac if on_gpu else host * 0.75
     buf_budget = host * 0.25 if not on_gpu else host           # on CPU the "device" shares host RAM
     per_src = K * (4 + d * itemsize) + d * (4 + itemsize) + 8   # running top K + the query itself
+    if local_prune:
+        per_src += K * 8                                         # and the neighbours' ids
     group = int(min(nq, (dev * 0.5) // per_src))
     if group < 1:
         raise MemoryError(f"one source needs {gib(per_src)} of device memory for K={K}; have {gib(dev)}")
@@ -81,8 +91,10 @@ def plan(nq, K, d, itemsize, rows, device, host_frac, gpu_frac, max_chunk, pr_it
         raise MemoryError(f"no room for a block: device {gib(dev)}, host {gib(host)}")
     pr_per_src = 3 * K * d * pr_itemsize + 2 * min(K, d) ** 2 * pr_itemsize
     pr_batch = int(max(1, min(group, (dev - group * per_src) // pr_per_src)))
+    prune_per_src = K * K * 4 * 2 + K * d * 4 + K * 64          # pairwise distances (+ a gathered slice), floats
+    prune_batch = int(max(1, min(group, (dev - group * per_src) * 0.5 // prune_per_src)))
     return {"host budget": host, "device budget": dev, "group": group, "query batch": qb, "chunk": chunk,
-            "merge batch": merge_batch, "pr batch": pr_batch, "per source": per_src}
+            "merge batch": merge_batch, "pr batch": pr_batch, "prune batch": prune_batch, "per source": per_src}
 
 
 def fingerprint(a):
@@ -104,16 +116,21 @@ def run_dataset(folder, args):
     n = f.shape[0]
     rows = args.rows.get(name, n)
     log(f"{name}: reading graph files {adj} and {computed}")
-    sources, out_deg = localdim.computed_out_degrees(adj, computed)
+    if args.local_prune:
+        sources, out_deg, out_nbrs = localdim.computed_out_neighbours(adj, computed)
+    else:
+        (sources, out_deg), out_nbrs = localdim.computed_out_degrees(adj, computed), None
     info = {"source": "npy", "dataset": str(folder), "adj": str(adj), "computed": str(computed)}
-    compute(name + (f"-n{rows}" if rows != n else ""), f, rows, sources, out_deg, info, args)
+    compute(name + (f"-n{rows}" if rows != n else ""), f, rows, sources, out_deg, info, args, out_nbrs)
 
 
-def compute(name, f, rows, sources, out_deg, info, args):
+def compute(name, f, rows, sources, out_deg, info, args, out_nbrs=None):
     """Steps 2-3 for one point set and its graph, written to OUT_DIR/<name>/. f: NpyFile or ArrayFile; rows: the
     graph was built on f's first `rows` points; sources (sorted) and out_deg: the points with a computed
-    out-neighbourhood; info: extra meta.json entries (e.g. where the data and graph came from). Shared with
-    local_dim_vibe.py."""
+    out-neighbourhood; info: extra meta.json entries (e.g. where the data and graph came from); out_nbrs:
+    {source: out-neighbour ids}, needed with --local-prune. Shared with local_dim_vibe.py."""
+    if args.local_prune and out_nbrs is None:
+        raise ValueError("--local-prune needs the out-neighbour lists")
     t0 = time.time()
     n, d = f.shape
     out = args.out_dir / name
@@ -128,25 +145,28 @@ def compute(name, f, rows, sources, out_deg, info, args):
     K, q = ks[-1], len(sources)
     device = localdim.resolve_device(args.device)
     p = plan(q, K, d, f.dtype.itemsize, rows, device, args.host_mem_fraction, args.gpu_mem_fraction,
-             args.max_chunk, np.dtype(args.pr_dtype).itemsize)
+             args.max_chunk, np.dtype(args.pr_dtype).itemsize, args.local_prune)
     meta_path = out / "meta.json"
     old = json.loads(meta_path.read_text()) if meta_path.exists() and not args.overwrite else None
     if old is not None and old.get("group") and old["group"] != p["group"]:
         # resuming: part files are per group, so keep the earlier grouping
         log(f"{name}: resuming with the earlier group size {old['group']:,} (planned {p['group']:,} now)")
         p["group"] = old["group"]
-        p["pr batch"] = min(p["pr batch"], p["group"])
+        p["pr batch"], p["prune batch"] = min(p["pr batch"], p["group"]), min(p["prune batch"], p["group"])
     groups = [(a, min(a + p["group"], q)) for a in range(0, q, p["group"])]
     log(f"{name}: {q:,} sources, {rows:,} x {d} {f.dtype} points, k = {ks}, device {device}\n"
           f"  budgets: host {gib(p['host budget'])}, device {gib(p['device budget'])}; "
           f"{gib(p['per source'])} per source\n"
           f"  {len(groups)} pass(es) of up to {p['group']:,} sources; chunk {p['chunk']:,} rows "
-          f"({gib(p['chunk'] * d * f.dtype.itemsize)}), query batch {p['query batch']:,}, merge batch {p['merge batch']:,}, PR batch {p['pr batch']:,}")
+          f"({gib(p['chunk'] * d * f.dtype.itemsize)}), query batch {p['query batch']:,}, merge batch {p['merge batch']:,}, PR batch {p['pr batch']:,}"
+          + (f", local-prune batch {p['prune batch']:,} (alpha {args.prune_alpha:g})" if args.local_prune else ""))
 
     meta = info | {"name": name, "n": n, "d": d,
             "dtype": str(f.dtype), "rows": rows, "ks": ks, "K": K, "centres": list(localdim.CENTRES),
             "estimator": args.estimator, "pr dtype": args.pr_dtype, "sources": q, "sources sha1": fingerprint(sources),
-            "max sources": args.max_sources, "seed": args.seed, "group": p["group"], "groups": len(groups)}
+            "max sources": args.max_sources, "seed": args.seed, "group": p["group"], "groups": len(groups),
+            "local prune": bool(args.local_prune or (old or {}).get("local prune")),
+            "prune alpha": args.prune_alpha if args.local_prune else (old or {}).get("prune alpha")}
     if old is not None:
         keys = ("rows", "ks", "estimator", "pr dtype", "sources sha1")
         if any(old.get(k) != meta[k] for k in keys):
@@ -172,19 +192,27 @@ def compute(name, f, rows, sources, out_deg, info, args):
         src_v = memmap("source_vectors.npy", (q, d), f.dtype)
         nbr_v = memmap("nbr_vectors.npy", (q, K, d), f.dtype)
     nbr_d = memmap("nbr_sq_dists.npy", (q, K), np.float32)
+    if args.local_prune:
+        nbr_i = memmap("nbr_ids.npy", (q, K), np.int64)
 
     import torch
     for g, (a, b) in enumerate(groups):
-        part = out / f"part-{g}.npz"
-        if part.exists():
+        part, prune_part = out / f"part-{g}.npz", out / f"part-{g}-prune.npz"
+        if part.exists() and (prune_part.exists() or not args.local_prune):
             log(f"{name}: group {g + 1}/{len(groups)} already done, skipped")
             continue
         log(f"{name}: group {g + 1}/{len(groups)}: reading {b - a:,} source vectors")
         Q_raw = f.rows(sources[a:b])
-        best_v, best_d = localdim.knn_vectors(f, rows, sources[a:b], Q_raw, K, device, p["chunk"], p["query batch"],
-                                              mininterval=args.progress_every, merge_batch=p["merge batch"])
+        res = localdim.knn_vectors(f, rows, sources[a:b], Q_raw, K, device, p["chunk"], p["query batch"],
+                                   mininterval=args.progress_every, merge_batch=p["merge batch"],
+                                   with_ids=args.local_prune)
+        best_v, best_d = res[:2]
         nbr_d[a:b] = best_d.cpu().numpy()
         nbr_d.flush()
+        if args.local_prune:
+            knn_ids = res[2].cpu().numpy()
+            nbr_i[a:b] = knn_ids
+            nbr_i.flush()
         if args.save_vectors:
             log(f"{name}: group {g + 1}/{len(groups)}: writing neighbour vectors to {out / 'nbr_vectors.npy'}")
             src_v[a:b] = Q_raw
@@ -202,6 +230,26 @@ def compute(name, f, rows, sources, out_deg, info, args):
             for key, val in localdim.local_pr_batch(best_v[s:e], Qt[s:e], ks, localdim.CENTRES,
                                                     args.estimator, args.pr_dtype).items():
                 pr[key][s:e] = val
+        if args.local_prune:
+            log(f"{name}: group {g + 1}/{len(groups)}: out-neighbours in the kNN and local robust prune "
+                f"(alpha {args.prune_alpha:g}) for {len(ks)} k values")
+            lp = {"out_in_knn": localdim.out_in_knn([out_nbrs[int(v)] for v in sources[a:b]], knn_ids, ks)}
+            deg = {k: np.empty(b - a, dtype=np.int64) for k in ks}
+            nbr = {k: [] for k in ks}
+            unc = {k: [] for k in ks}
+            for s in localdim.track(range(0, b - a, p["prune batch"]), -(-(b - a) // p["prune batch"]),
+                                    "local prune", "batch", args.progress_every):
+                e = min(s + p["prune batch"], b - a)
+                for k, (edges, left, dg) in localdim.local_robust_prune(best_v[s:e], best_d[s:e], ks,
+                                                                        args.prune_alpha).items():
+                    deg[k][s:e] = dg
+                    valid = edges >= 0                     # row-major: each source's edges in order
+                    nbr[k].append(knn_ids[s:e][np.nonzero(valid)[0], edges[valid]])
+                    unc[k].append(left[valid])
+            np.savez(prune_part, **{f"out_in_knn_k{k}": lp["out_in_knn"][k] for k in ks},
+                     **{f"lp_degree_k{k}": deg[k] for k in ks},
+                     **{f"lp_nbrs_k{k}": np.concatenate(nbr[k]) for k in ks},
+                     **{f"lp_uncovered_k{k}": np.concatenate(unc[k]) for k in ks})
         np.savez(part, **{f"pr_{c}_k{k}": v for (c, k), v in pr.items()})   # written last: marks the group done
         del best_v, best_d, Qt
         if device.startswith("cuda"):
@@ -210,9 +258,28 @@ def compute(name, f, rows, sources, out_deg, info, args):
 
     parts = [np.load(out / f"part-{g}.npz") for g in range(len(groups))]
     cols = {key: np.concatenate([z[key] for z in parts]) for key in parts[0].files}
+    if args.local_prune:
+        lps = [np.load(out / f"part-{g}-prune.npz") for g in range(len(groups))]
+        for k in ks:
+            cols[f"out_in_knn_k{k}"] = np.concatenate([z[f"out_in_knn_k{k}"] for z in lps])
+            cols[f"lp_degree_k{k}"] = np.concatenate([z[f"lp_degree_k{k}"] for z in lps])
+            write_local_prune(out / f"local_prune_k{k}.txt", sources, cols[f"lp_degree_k{k}"],
+                              np.concatenate([z[f"lp_nbrs_k{k}"] for z in lps]),
+                              np.concatenate([z[f"lp_uncovered_k{k}"] for z in lps]))
+        log(f"{name}: wrote {out}/local_prune_k<k>.txt for k = {ks}")
     df = pd.DataFrame({"source": sources, "out_degree": out_deg} | cols)
     df.to_csv(out / "local_pr.csv", index=False)
     log(f"{name}: wrote {out / 'local_pr.csv'} ({localdim._hms(time.time() - t0)})")
+
+
+def write_local_prune(path, sources, degree, nbrs, uncovered):
+    """Local-prune neighbourhoods in the vibe.py adjacency format, one line per source:
+    "source [(neighbour id, points of N_k(v) still uncovered after this edge), ...]"."""
+    ends = np.cumsum(degree)
+    with open(path, "w") as fh:
+        for v, e, dg in zip(sources, ends, degree):
+            fh.write(f"{v} [" + ", ".join(f"({n}, {u})" for n, u in zip(nbrs[e - dg : e], uncovered[e - dg : e]))
+                     + "]\n")
 
 
 def add_compute_args(p):
@@ -233,6 +300,10 @@ def add_compute_args(p):
     p.add_argument("--skip-missing", action="store_true", help="skip datasets without data or graph files")
     p.add_argument("--no-save-vectors", dest="save_vectors", action="store_false",
                    help="do not write source_vectors.npy / nbr_vectors.npy (q x K x d; can be terabytes)")
+    p.add_argument("--local-prune", action="store_true",
+                   help="also: the fraction of each source's out-neighbourhood inside N_k(v), and robust prune from v "
+                        "over N_k(v) alone (local_prune_k<k>.txt per k; out_in_knn_k<k> and lp_degree_k<k> columns)")
+    p.add_argument("--prune-alpha", type=float, default=1.0, help="alpha of the local robust prune (default 1)")
     p.add_argument("--overwrite", action="store_true", help="discard earlier results in OUT_DIR/<name>/")
     p.add_argument("--progress-every", type=float, default=30, help="seconds between progress updates")
 

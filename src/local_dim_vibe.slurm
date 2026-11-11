@@ -37,6 +37,8 @@
 REPO="$SCRATCH/multi-vector-search"                  # repository root on the cluster
 DOWNLOAD_DIR="$SCRATCH/ANN-Search/datasets/vibe"     # <dataset>.hdf5 files (vibe_pipeline.slurm's DOWNLOAD_DIR)
 GRAPH_DIR="$REPO/results/vibe_graphs"                # vibe_pipeline.py's --graph-dir (its default)
+LOCAL_PRUNE=1                                        # 1: also --local-prune (out-neighbours in the kNN, robust prune
+                                                     #    over N_k(v); re-runs the k-NN pass of results made without it)
 
 # Dataset names up to "--", local_dim_vibe.py arguments after it.
 NAMES=()
@@ -57,7 +59,9 @@ for name in "${NAMES[@]}"; do
     DATASET_ARGS="$DATASET_ARGS --dataset='$name'"
 done
 
-echo "Starting local-dim VIBE job for: ${NAMES[*]}  (data: $DOWNLOAD_DIR; graphs: $GRAPH_DIR; extra args: ${EXTRA_ARGS:-none})"
+[ "$LOCAL_PRUNE" = "1" ] && PRUNE_ARGS="--local-prune" || PRUNE_ARGS=""
+
+echo "Starting local-dim VIBE job for: ${NAMES[*]}  (data: $DOWNLOAD_DIR; graphs: $GRAPH_DIR; local prune: $LOCAL_PRUNE; extra args: ${EXTRA_ARGS:-none})"
 
 # --nv exposes the GPU inside the container. PYTHONUNBUFFERED so progress lines reach the log as they happen.
 singularity exec --nv --fakeroot --overlay $SCRATCH/envs/overlay-15GB-500K.ext3:ro /share/apps/images/cuda12.1.1-cudnn8.9.0-devel-ubuntu22.04.2.sif /bin/bash -c "
@@ -67,5 +71,5 @@ export OMP_NUM_THREADS=$SLURM_CPUS_PER_TASK OPENBLAS_NUM_THREADS=$SLURM_CPUS_PER
 export PYTHONUNBUFFERED=1
 nvidia-smi || true
 
-python $REPO/src/local_dim_vibe.py --download-dir='$DOWNLOAD_DIR' --graph-dir='$GRAPH_DIR' $DATASET_ARGS --skip-missing --progress-every 60 --max-sources 10000 --no-save-vectors $EXTRA_ARGS
+python $REPO/src/local_dim_vibe.py --download-dir='$DOWNLOAD_DIR' --graph-dir='$GRAPH_DIR' $DATASET_ARGS --skip-missing --progress-every 60 $PRUNE_ARGS --max-sources 10000 --no-save-vectors $EXTRA_ARGS
 "

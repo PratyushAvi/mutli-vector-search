@@ -196,6 +196,23 @@ def computed_out_degrees(adj_path, computed_path):
     return sources, out_deg
 
 
+def computed_out_neighbours(adj_path, computed_path):
+    """(sources, out-degrees, {source: neighbour ids}) like computed_out_degrees, keeping the neighbour lists."""
+    with open(computed_path) as f:
+        ids = [int(s) for s in (l.strip() for l in f) if s]
+    with open(adj_path) as f:
+        hoods = [parse_neighbours(l) for l in f if l.strip()]
+    if len(ids) != len(hoods):
+        raise ValueError(f"{computed_path} has {len(ids):,} lines but {adj_path} has {len(hoods):,}; "
+                         "line i of one must match line i of the other")
+    nbrs = dict(zip(ids, hoods))                          # later lines win
+    if len(nbrs) < len(ids):
+        print(f"warning: {len(ids) - len(nbrs):,} points appear more than once in {computed_path}; "
+              "kept the last line of each")
+    sources = np.array(sorted(nbrs), dtype=np.int64)
+    return sources, np.array([len(nbrs[s]) for s in sources], dtype=np.int64), nbrs
+
+
 ### Reading vectors.npy ###
 
 class NpyFile:
@@ -274,7 +291,7 @@ def iter_blocks(f, stop, chunk, start=0):
 ### Nearest neighbours, keeping their vectors ###
 
 def knn_vectors(f, rows, q_ids, Q_raw, k, device, chunk, query_batch, progress=True, mininterval=0.1,
-                merge_batch=None):
+                merge_batch=None, with_ids=False):
     """The k nearest neighbours (squared Euclidean) of each query among rows 0 .. rows - 1 of NpyFile f, a
     query itself excluded: their vectors (in the file's dtype) and squared distances, nearest first.
 
@@ -284,7 +301,8 @@ def knn_vectors(f, rows, q_ids, Q_raw, k, device, chunk, query_batch, progress=T
     point closer than their current k-th neighbour are merged, so late blocks cost little beyond the
     distance computation. Distances are float32. merge_batch caps how many queries are merged at once (merging
     holds about 2 * k * (d * itemsize + 12) bytes per query; None: the whole query batch).
-    Returns torch tensors (vectors (q, k, d), dists (q, k))."""
+    Returns torch tensors (vectors (q, k, d), dists (q, k)), and with with_ids=True also their row ids (q, k)
+    (int64, 8 * k more bytes per query)."""
     import torch
     nq, d = Q_raw.shape
     assert np.all(np.diff(q_ids) > 0), "queries must be sorted and unique"
@@ -295,6 +313,7 @@ def knn_vectors(f, rows, q_ids, Q_raw, k, device, chunk, query_batch, progress=T
     own_all = torch.as_tensor(np.asarray(q_ids, dtype=np.int64), device=device)
     best_d = torch.full((nq, k), float("inf"), device=device)
     best_v = torch.zeros((nq, k, d), dtype=Qr.dtype, device=device)
+    best_i = torch.full((nq, k), -1, dtype=torch.int64, device=device) if with_ids else None
 
     blocks = iter_blocks(f, rows, chunk)
     if progress:
@@ -325,9 +344,13 @@ def knn_vectors(f, rows, q_ids, Q_raw, k, device, chunk, query_batch, progress=T
                 rr, cc = torch.nonzero(from_blk, as_tuple=True)
                 v[rr, cc] = Xr[i_blk[cand][rr, pos[rr, cc] - k]]
                 best_d[rws], best_v[rws] = d_new, v
+                if with_ids:
+                    i_all = torch.cat([best_i[rws], s + i_blk[cand]], 1)
+                    best_i[rws] = i_all.gather(1, pos)
+                    del i_all
                 del d_all, d_new, pos, from_blk, v, rr, cc
         del Xr, X, x_sq
-    return best_v, best_d
+    return (best_v, best_d, best_i) if with_ids else (best_v, best_d)
 
 
 ### Local PR ###
@@ -364,6 +387,65 @@ def local_pr_batch(Y, v, ks, centres=CENTRES, estimator="plugin", dtype="float64
         for c in centres:
             ref = Yk.mean(1, keepdim=True) if c == "mean" else v[:, None]
             out[(c, k)] = pr_rows(Yk - ref, estimator).cpu().numpy()
+    return out
+
+
+### Out-neighbours in the kNN, local robust prune ###
+
+def out_in_knn(out_nbrs, knn_ids, ks):
+    """{k: fraction of the out-neighbourhood inside N_k(v)} per source (numpy, NaN for out-degree 0).
+    out_nbrs: list of neighbour-id arrays, one per source; knn_ids: (q, K) ids, nearest first."""
+    knn_ids = np.asarray(knn_ids)
+    out = {k: np.full(len(out_nbrs), np.nan) for k in ks}
+    for i, nb in enumerate(out_nbrs):
+        if len(nb) == 0:
+            continue
+        ids = knn_ids[i]
+        order = np.argsort(ids, kind="stable")
+        pos = np.clip(np.searchsorted(ids[order], nb), 0, len(ids) - 1)
+        hit = ids[order][pos] == nb
+        rank = order[pos[hit]]                                     # position of each out-neighbour in the kNN list
+        for k in ks:
+            out[k][i] = np.count_nonzero(rank < k) / len(nb)
+    return out
+
+
+def local_robust_prune(Y, dv, ks, alpha=1.0):
+    """Robust prune from v over its k nearest neighbours only, for every k in ks, for a batch of sources.
+
+    Y: (b, K, d) neighbour vectors (any dtype), nearest first; dv: (b, K) squared distances to v; every k is a
+    prefix. As utils.batchedEuclideanRobustPrune: the next edge is the nearest still-uncovered point w, which
+    covers itself and every p with alpha^2 * d2(w, p) < d2(v, p); repeat until all k points are covered.
+    Returns {k: (edges (b, k) positions in the kNN list, -1 padded; uncovered (b, k) points still uncovered after
+    each edge, -1 padded; degree (b,))} as numpy arrays."""
+    import torch
+    b, K, _ = Y.shape
+    Yf = Y.float()
+    sq = (Yf * Yf).sum(2)
+    D = torch.baddbmm(sq[:, :, None] + sq[:, None, :], Yf, Yf.mT, alpha=-2).clamp_min_(0)    # (b, K, K)
+    del Yf
+    a2, dv = float(alpha) ** 2, dv.float()
+    rows = torch.arange(b, device=Y.device)
+    out = {}
+    for k in ks:
+        Dk, dk = D[:, :k, :k], dv[:, :k]
+        unc = torch.ones((b, k), dtype=torch.bool, device=Y.device)
+        edges = torch.full((b, k), -1, dtype=torch.int64, device=Y.device)
+        left = torch.full((b, k), -1, dtype=torch.int64, device=Y.device)
+        deg = torch.zeros(b, dtype=torch.int64, device=Y.device)
+        idx = torch.arange(k, device=Y.device)
+        for step in range(k):
+            act = rows[unc.any(1)]
+            if len(act) == 0:
+                break
+            w = torch.where(unc[act], idx, k).min(1).values        # nearest uncovered (the list is sorted by d2 to v)
+            cov = Dk[act, w] * a2 < dk[act]
+            cov[torch.arange(len(act), device=Y.device), w] = True
+            unc[act] &= ~cov
+            edges[act, step], left[act, step] = w, unc[act].sum(1)
+            deg[act] += 1
+        out[k] = (edges.cpu().numpy(), left.cpu().numpy(), deg.cpu().numpy())
+    del D
     return out
 
 
@@ -421,6 +503,38 @@ def _check():
                     assert pr[(c, k)][i] <= pr_cap(k, d, c) + 1e-9
                 assert np.isclose(pu[("mean", k)][i], participation_ratio(Yk)), k
         print("local_pr_batch: plug-in matches eigenvalues, 'u' matches effdim.participation_ratio, caps hold")
+
+        # ids from the k-NN pass, out-neighbours in the kNN, local robust prune (against plain loops)
+        Y, dist, ids = knn_vectors(f, n, queries, f.rows(queries), K, "cpu", chunk=700, query_batch=17,
+                                   progress=False, merge_batch=5, with_ids=True)
+        assert np.allclose(((V[ids.numpy()] - V[queries, None]) ** 2).sum(2), dist.numpy(), rtol=1e-4, atol=1e-2)
+        assert np.array_equal(V[ids.numpy()], Y.numpy().astype(np.float32)), "ids don't point at the kept vectors"
+        outs = [rng.choice(n, rng.integers(0, 12), replace=False) for _ in queries]
+        outs[0] = ids.numpy()[0, [0, 5, 30]]                # 1 / 3 inside k = 1..5, 2 / 3 for k in 6..30, all from 31
+        fr = out_in_knn(outs, ids.numpy(), ks)
+        for i, o in enumerate(outs):
+            for k in ks:
+                want = np.isin(o, ids.numpy()[i, :k]).mean() if len(o) else np.nan
+                assert np.isclose(fr[k][i], want, equal_nan=True), (i, k)
+        assert np.isclose(fr[10][0], 2 / 3) and np.isclose(fr[40][0], 1.0)
+
+        for alpha in (1.0, 1.5):                        # alpha^2 = 2.25: exact in float32 on these integer data
+            lp = local_robust_prune(Y, dist, ks, alpha)
+            for i in range(len(queries)):
+                for k in ks:
+                    P = Y[i, :k].numpy().astype(np.float64)
+                    dv = dist[i, :k].numpy().astype(np.float64)
+                    unc, edges, left = np.ones(k, bool), [], []
+                    while unc.any():                        # the textbook loop
+                        w = int(np.argmax(unc))             # nearest uncovered (sorted by distance to v)
+                        cov = alpha**2 * ((P - P[w]) ** 2).sum(1) < dv
+                        cov[w] = True
+                        unc &= ~cov
+                        edges.append(w), left.append(int(unc.sum()))
+                    e, l, dg = lp[k][0][i], lp[k][1][i], lp[k][2][i]
+                    assert dg == len(edges) and e[:dg].tolist() == edges and l[:dg].tolist() == left, (alpha, i, k)
+                    assert (e[dg:] == -1).all() and l[dg - 1] == 0
+        print("knn ids, out_in_knn and local_robust_prune match plain loops (alpha 1, 1.5)")
     print(f"host_available_bytes: {host_available_bytes() / 2**30:.1f} GiB")
 
 
